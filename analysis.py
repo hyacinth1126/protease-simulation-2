@@ -1,0 +1,1135 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Hydrogel FRET Advanced Kinetic Analysis - Core Logic
+Three competing models: Substrate Depletion, Enzyme Deactivation, Mass-Transfer Limitation
+"""
+
+import numpy as np
+import pandas as pd
+from scipy.integrate import solve_ivp
+from scipy.optimize import curve_fit
+from dataclasses import dataclass
+from typing import Dict
+import warnings
+
+# Suppress scipy optimization warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='scipy')
+warnings.filterwarnings('ignore', message='Covariance of the parameters could not be estimated')
+
+
+@dataclass
+class ModelResults:
+    """Container for model fitting results"""
+    name: str
+    params: Dict[str, float]
+    params_std: Dict[str, float]
+    aic: float
+    bic: float
+    r_squared: float
+    rmse: float
+    predictions: np.ndarray
+    residuals: np.ndarray
+
+
+class DataNormalizer:
+    """Normalize fluorescence data to fraction cleaved"""
+    
+    def __init__(self):
+        pass
+        
+    def normalize(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Normalize fluorescence: α(t) = (F(t) - F0) / (Fmax - F0)
+        
+        Uses exponential fitting to determine Fmax (asymptote):
+        F(t) = F0 + A * (1 - exp(-k*t))
+        Fmax = F0 + A (asymptote)
+        
+        Parameters:
+        - df: DataFrame with flexible column names
+        
+        Returns:
+        - DataFrame with additional columns: alpha, F0, Fmax, fit_k
+        """
+        # Detect column names automatically
+        time_col = 'time_s' if 'time_s' in df.columns else 'time_min'
+        conc_col = 'enzyme_ugml' if 'enzyme_ugml' in df.columns else 'peptide_uM' if 'peptide_uM' in df.columns else 'E_nM'
+        fluor_col = 'FL_intensity' if 'FL_intensity' in df.columns else 'RFU' if 'RFU' in df.columns else 'fluor'
+        
+        # Store for later use
+        self.time_col = time_col
+        self.conc_col = conc_col
+        self.fluor_col = fluor_col
+        
+        def normalize_group(g):
+            g_sorted = g.sort_values(time_col)
+            
+            # F0: initial fluorescence (t=0)
+            F0_mask = g_sorted[time_col] == 0
+            if F0_mask.any():
+                F0 = float(g_sorted.loc[F0_mask, fluor_col].iloc[0])
+            else:
+                F0 = float(g_sorted[fluor_col].iloc[0])
+            
+            # Fit exponential to determine Fmax (asymptote)
+            # F(t) = F0 + A * (1 - exp(-k*t))
+            t_data = g_sorted[time_col].values
+            F_data = g_sorted[fluor_col].values
+            
+            try:
+                # Exponential fit function
+                def exp_func(t, A, k):
+                    return F0 + A * (1 - np.exp(-k * t))
+                
+                # Initial guess: A = max change, k = 0.1 (moderate rate)
+                A_guess = F_data[-1] - F0 if len(F_data) > 0 else 1000
+                p0 = [A_guess, 0.1]
+                
+                # Fit with bounds
+                popt, pcov = curve_fit(
+                    exp_func, t_data, F_data, 
+                    p0=p0, 
+                    bounds=([0, 0.001], [np.inf, 10]),
+                    maxfev=5000
+                )
+                
+                A_fit, k_fit = popt
+                Fmax = F0 + A_fit  # Asymptote
+                Fmax_std = np.sqrt(np.diag(pcov))[0]  # Uncertainty in A
+                
+                # Generate fitted curve for visualization
+                t_fit = np.linspace(0, t_data.max(), 100)
+                F_fit = exp_func(t_fit, A_fit, k_fit)
+                
+            except Exception as e:
+                # Fallback: use average of last 3 points
+                Fmax = float(g_sorted[fluor_col].tail(3).mean())
+                Fmax_std = float(g_sorted[fluor_col].tail(3).std())
+                k_fit = 0.1  # Default
+                t_fit = np.linspace(0, t_data.max(), 100)
+                F_fit = np.full_like(t_fit, Fmax)
+            
+            # Ensure Fmax > F0
+            if Fmax <= F0:
+                Fmax = F0 + 100
+            
+            # Calculate fraction cleaved
+            g = g_sorted.copy()
+            g['alpha'] = (g[fluor_col] - F0) / (Fmax - F0)
+            g['alpha'] = g['alpha'].clip(0, 1)
+            g['F0'] = F0
+            g['Fmax'] = Fmax
+            g['Fmax_std'] = Fmax_std
+            g['fit_k'] = k_fit
+            
+            # Store fitted curve for plotting
+            g['t_fit'] = [t_fit] * len(g)
+            g['F_fit'] = [F_fit] * len(g)
+            
+            #Store original column names for later use
+            g['time_col_name'] = time_col
+            g['conc_col_name'] = conc_col
+            g['fluor_col_name'] = fluor_col
+            
+            return g
+        
+        df_normalized = df.groupby(conc_col, group_keys=False).apply(normalize_group)
+        return df_normalized
+
+
+class ModelA_SubstrateDepletion:
+    """
+    Model A: Substrate Depletion
+    
+    Surface reaction with immobilized substrate:
+    dΓ/dt = -v = -(kcat * Es * Γ) / (KM + Γ)
+    
+    Simplified (Γ << KM): dΓ/dt = -kobs * Γ
+    where kobs ≈ (kcat/KM) * Es
+    
+    Solution: α(t) = 1 - exp(-kobs * t)
+    With mass transfer: Es ≈ Eb / (1 + Da), Da = (kcat*Γ0)/(KM*km)
+    
+    Parameters to fit:
+    - kcat_KM: catalytic efficiency (M^-1 s^-1)
+    - Gamma0: initial surface substrate density (pmol/cm²)
+    - km: mass transfer coefficient (optional, m/s)
+    """
+    
+    def __init__(self, enzyme_mw: float = 56.6):
+        self.enzyme_mw = enzyme_mw  # kDa
+        self.name = "Model A: Substrate Depletion"
+        
+    def model_simple(self, t: np.ndarray, E_M: float, kcat_KM: float) -> np.ndarray:
+        """
+        Simplified first-order kinetics
+        α(t) = 1 - exp(-kobs * t)
+        kobs = (kcat/KM) * [E]
+        """
+        kobs = kcat_KM * E_M
+        alpha = 1.0 - np.exp(-kobs * t)
+        return alpha
+    
+    def model_with_saturation(self, t: np.ndarray, E_M: float, 
+                             kcat_KM: float, Gamma0: float, KM: float = 1e-6) -> np.ndarray:
+        """
+        Full Michaelis-Menten kinetics
+        Numerically integrate: dΓ/dt = -(kcat/KM) * E * Γ
+        """
+        kcat = kcat_KM * KM
+        
+        def dydt(t_val, y):
+            Gamma = y[0]
+            if Gamma < 0:
+                return [0]
+            v = (kcat * E_M * Gamma) / (KM + Gamma)
+            return [-v]
+        
+        sol = solve_ivp(dydt, [t[0], t[-1]], [Gamma0], t_eval=t, method='LSODA')
+        Gamma_t = sol.y[0]
+        alpha = 1.0 - Gamma_t / Gamma0
+        return np.clip(alpha, 0, 1)
+    
+    def fit_global(self, df: pd.DataFrame, verbose_callback=None) -> ModelResults:
+        """
+        Global fit to all concentration data
+        
+        Parameters:
+        - df: DataFrame with normalized data
+        - verbose_callback: Optional callback function(message) for logging
+        
+        Returns:
+        - ModelResults object or None if fitting fails
+        """
+        # Use all data - no filtering
+        df_fit = df.copy()
+        
+        if verbose_callback:
+            verbose_callback(f"Model A: 전체 {len(df_fit)}개 데이터 포인트 사용 (필터링 없음)")
+        
+        if len(df_fit) < 5:
+            if verbose_callback:
+                verbose_callback(f"Model A: 피팅 데이터가 충분하지 않습니다. (사용 가능: {len(df_fit)}개)", level="error")
+            return None
+        
+        # Convert enzyme concentration to M
+        MW = self.enzyme_mw * 1000  # g/mol
+        df_fit['E_M'] = (df_fit['enzyme_ugml'] / MW) * 1e-6  # ug/mL to M
+        
+        t = df_fit['time_s'].values
+        E = df_fit['E_M'].values
+        y = df_fit['alpha'].values
+        
+        # Store globally for model function access
+        self._t_data = t
+        self._E_data = E
+        
+        # Fit simplified model: α = 1 - exp(-(kcat/KM)*E*t)
+        def model_func(x_dummy, kcat_KM):
+            """Model function for curve_fit"""
+            result = np.zeros_like(self._t_data)
+            for i in range(len(self._t_data)):
+                kobs = kcat_KM * self._E_data[i]
+                result[i] = 1.0 - np.exp(-kobs * self._t_data[i])
+            return result
+        
+        try:
+            # Better initial guess estimation
+            kobs_estimates = []
+            for conc in df_fit['enzyme_ugml'].unique():
+                subset = df_fit[df_fit['enzyme_ugml'] == conc].sort_values('time_s')
+                if len(subset) >= 3:
+                    early = subset.head(min(5, len(subset)))
+                    t_early = early['time_s'].values
+                    alpha_early = early['alpha'].values
+                    
+                    alpha_safe = np.clip(alpha_early, 0.01, 0.99)
+                    y_log = -np.log(1 - alpha_safe)
+                    
+                    if len(t_early) >= 2 and t_early[-1] > t_early[0]:
+                        kobs_est = (y_log[-1] - y_log[0]) / (t_early[-1] - t_early[0])
+                        E_conc = subset['E_M'].iloc[0]
+                        if E_conc > 0 and kobs_est > 0:
+                            kcat_KM_est = kobs_est / E_conc
+                            kobs_estimates.append(kcat_KM_est)
+            
+            if len(kobs_estimates) > 0:
+                kcat_KM_guess = np.median(kobs_estimates)
+                kcat_KM_guess = np.clip(kcat_KM_guess, 1e2, 1e10)
+            else:
+                kcat_KM_guess = 1e5
+            
+            p0 = [kcat_KM_guess]
+            
+            if verbose_callback:
+                verbose_callback(f"Model A 초기값: kcat/KM = {kcat_KM_guess:.2e} M⁻¹s⁻¹")
+            
+            # Dummy x values (just indices)
+            x_dummy = np.arange(len(y))
+            
+            # Curve fit with wider bounds
+            popt, pcov = curve_fit(
+                model_func, x_dummy, y, 
+                p0=p0, bounds=([1e3], [1e9]), maxfev=20000
+            )
+            
+            kcat_KM_fit = popt[0]
+            perr = np.sqrt(np.diag(pcov))
+            kcat_KM_std = perr[0]
+            
+            # Calculate predictions and metrics
+            y_pred = model_func(x_dummy, kcat_KM_fit)
+            residuals = y - y_pred
+            ss_res = np.sum(residuals ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            rmse = np.sqrt(np.mean(residuals ** 2))
+            
+            # AIC/BIC
+            n = len(y)
+            k = 1  # number of parameters
+            if ss_res > 0:
+                log_likelihood = -n/2 * np.log(2*np.pi*ss_res/n) - n/2
+            else:
+                log_likelihood = 0
+            aic = 2*k - 2*log_likelihood
+            bic = k*np.log(n) - 2*log_likelihood
+            
+            params = {'kcat_KM': kcat_KM_fit}
+            params_std = {'kcat_KM': kcat_KM_std}
+            
+            # Generate full predictions for all data (including saturated)
+            t_full = df['time_s'].values
+            E_full = (df['enzyme_ugml'].values / MW) * 1e-6
+            y_pred_full = np.zeros(len(t_full))
+            for i in range(len(t_full)):
+                kobs = kcat_KM_fit * E_full[i]
+                y_pred_full[i] = 1.0 - np.exp(-kobs * t_full[i])
+            
+            return ModelResults(
+                name=self.name,
+                params=params,
+                params_std=params_std,
+                aic=aic,
+                bic=bic,
+                r_squared=r_squared,
+                rmse=rmse,
+                predictions=y_pred_full,
+                residuals=df['alpha'].values - y_pred_full
+            )
+            
+        except Exception as e:
+            if verbose_callback:
+                verbose_callback(f"Model A 피팅 오류: {str(e)}", level="error")
+                import traceback
+                verbose_callback(traceback.format_exc(), level="debug")
+            return None
+
+
+class ModelB_EnzymeDeactivation:
+    """
+    Model B: Enzyme Deactivation
+    
+    Active enzyme decays: dE/dt = -kd * E → E(t) = E0 * exp(-kd*t)
+    Surface reaction: dΓ/dt = -(kcat/KM) * E(t) * Γ
+    
+    For Γ << KM (first order in Γ):
+    α(t) = α∞ * [1 - exp(-kobs*t)], where α∞ < 1 if enzyme deactivates fast
+    
+    Or integrated: α(t) = (kcat/KM)*E0/kd * [1 - exp(-kd*t)] when Γ>>KM
+    
+    Approximate: α(t) ≈ 1 - exp[-(kcat/KM)*E0/kd * (1 - exp(-kd*t))]
+    
+    Parameters to fit:
+    - kcat_KM: catalytic efficiency (M^-1 s^-1)
+    - kd: enzyme deactivation rate (s^-1)
+    """
+    
+    def __init__(self, enzyme_mw: float = 56.6):
+        self.enzyme_mw = enzyme_mw
+        self.name = "Model B: Enzyme Deactivation"
+    
+    def model(self, t: np.ndarray, E0_M: float, kcat_KM: float, kd: float) -> np.ndarray:
+        """
+        Model with enzyme deactivation
+        Assuming first-order in both enzyme and substrate
+        
+        Solution: α(t) = 1 - exp[-(kcat/KM)*E0/kd * (1 - exp(-kd*t))]
+        """
+        if kd <= 0:
+            # No deactivation, revert to Model A
+            kobs = kcat_KM * E0_M
+            return 1.0 - np.exp(-kobs * t)
+        
+        # Integrated form
+        integral_term = (kcat_KM * E0_M / kd) * (1 - np.exp(-kd * t))
+        alpha = 1.0 - np.exp(-integral_term)
+        return np.clip(alpha, 0, 1)
+    
+    def fit_global(self, df: pd.DataFrame, verbose_callback=None) -> ModelResults:
+        """Global fit including enzyme deactivation"""
+        df_fit = df.copy()
+        
+        if verbose_callback:
+            verbose_callback(f"Model B: 전체 {len(df_fit)}개 데이터 포인트 사용 (필터링 없음)")
+        
+        if len(df_fit) < 5:
+            if verbose_callback:
+                verbose_callback(f"Model B: 피팅 데이터가 충분하지 않습니다. (사용 가능: {len(df_fit)}개)", level="error")
+            return None
+        
+        MW = self.enzyme_mw * 1000
+        df_fit['E_M'] = (df_fit['enzyme_ugml'] / MW) * 1e-6
+        
+        t = df_fit['time_s'].values
+        E = df_fit['E_M'].values
+        y = df_fit['alpha'].values
+        
+        self._t_data = t
+        self._E_data = E
+        
+        def model_func(x_dummy, kcat_KM, kd):
+            """Model function for curve_fit"""
+            result = np.zeros_like(self._t_data)
+            for i in range(len(self._t_data)):
+                result[i] = self.model(self._t_data[i], self._E_data[i], kcat_KM, kd)
+            return result
+        
+        try:
+            # Better initial guess estimation
+            kobs_estimates = []
+            for conc in df_fit['enzyme_ugml'].unique():
+                subset = df_fit[df_fit['enzyme_ugml'] == conc].sort_values('time_s')
+                if len(subset) >= 3:
+                    early = subset.head(min(5, len(subset)))
+                    t_early = early['time_s'].values
+                    alpha_early = early['alpha'].values
+                    alpha_safe = np.clip(alpha_early, 0.01, 0.99)
+                    y_log = -np.log(1 - alpha_safe)
+                    if len(t_early) >= 2 and t_early[-1] > t_early[0]:
+                        kobs_est = (y_log[-1] - y_log[0]) / (t_early[-1] - t_early[0])
+                        E_conc = subset['E_M'].iloc[0]
+                        if E_conc > 0 and kobs_est > 0:
+                            kcat_KM_est = kobs_est / E_conc
+                            kobs_estimates.append(kcat_KM_est)
+            
+            if len(kobs_estimates) > 0:
+                kcat_KM_guess = np.median(kobs_estimates)
+                kcat_KM_guess = np.clip(kcat_KM_guess, 1e2, 1e10)
+            else:
+                kcat_KM_guess = 1e5
+            
+            p0 = [kcat_KM_guess, 0.5]
+            
+            if verbose_callback:
+                verbose_callback(f"Model B 초기값: kcat/KM = {kcat_KM_guess:.2e} M⁻¹s⁻¹, kd = 0.5 s⁻¹")
+            
+            x_dummy = np.arange(len(y))
+            
+            popt, pcov = curve_fit(
+                model_func, x_dummy, y, p0=p0, 
+                bounds=([1e3, 0.001], [1e9, 100]),
+                maxfev=20000
+            )
+            
+            kcat_KM_fit, kd_fit = popt
+            perr = np.sqrt(np.diag(pcov))
+            
+            y_pred = model_func(x_dummy, kcat_KM_fit, kd_fit)
+            residuals = y - y_pred
+            ss_res = np.sum(residuals ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            rmse = np.sqrt(np.mean(residuals ** 2))
+            
+            n = len(y)
+            k = 2
+            if ss_res > 0:
+                log_likelihood = -n/2 * np.log(2*np.pi*ss_res/n) - n/2
+            else:
+                log_likelihood = 0
+            aic = 2*k - 2*log_likelihood
+            bic = k*np.log(n) - 2*log_likelihood
+            
+            params = {'kcat_KM': kcat_KM_fit, 'kd': kd_fit}
+            params_std = {'kcat_KM': perr[0], 'kd': perr[1]}
+            
+            t_full = df['time_s'].values
+            E_full = (df['enzyme_ugml'].values / MW) * 1e-6
+            y_pred_full = np.zeros(len(t_full))
+            for i in range(len(t_full)):
+                y_pred_full[i] = self.model(t_full[i], E_full[i], kcat_KM_fit, kd_fit)
+            
+            return ModelResults(
+                name=self.name,
+                params=params,
+                params_std=params_std,
+                aic=aic,
+                bic=bic,
+                r_squared=r_squared,
+                rmse=rmse,
+                predictions=y_pred_full,
+                residuals=df['alpha'].values - y_pred_full
+            )
+            
+        except Exception as e:
+            if verbose_callback:
+                verbose_callback(f"Model B 피팅 오류: {str(e)}", level="error")
+                import traceback
+                verbose_callback(traceback.format_exc(), level="debug")
+            return None
+
+
+class ModelC_MassTransfer:
+    """
+    Model C: Mass-Transfer Limitation
+    
+    Diffusion-limited enzyme delivery to surface
+    Simplified using mass transfer coefficient km:
+    
+    Flux: J = km * (Eb - Es)
+    Surface reaction: v = (kcat/KM) * Es * Γ
+    
+    Damköhler number: Da = (kcat*Γ0) / (KM*km)
+    
+    For high Da (reaction >> diffusion):
+    Es << Eb, reaction is diffusion-controlled
+    
+    Approximate model: α(t) = 1 - exp(-keff*t)
+    where keff = (kcat/KM)*Es, and Es depends on km and Da
+    
+    Parameters to fit:
+    - kcat_KM: catalytic efficiency
+    - km: mass transfer coefficient (m/s)
+    - Gamma0: surface substrate density
+    """
+    
+    def __init__(self, enzyme_mw: float = 56.6):
+        self.enzyme_mw = enzyme_mw
+        self.name = "Model C: Mass-Transfer Limitation"
+    
+    def calculate_Es(self, Eb: float, kcat_KM: float, Gamma0: float, 
+                     km: float, KM: float = 1e-6) -> float:
+        """
+        Calculate surface enzyme concentration accounting for mass transfer
+        Es ≈ Eb / (1 + Da), where Da = (kcat*Γ0)/(KM*km)
+        """
+        kcat = kcat_KM * KM
+        km_cm = km * 100
+        Da = (kcat * Gamma0 * 1e-12) / (KM * km_cm)
+        Es = Eb / (1 + Da)
+        return Es
+    
+    def model(self, t: np.ndarray, Eb_M: float, kcat_KM: float, 
+              km: float, Gamma0: float = 1.0) -> np.ndarray:
+        """Model with mass transfer limitation"""
+        Es = self.calculate_Es(Eb_M, kcat_KM, Gamma0, km)
+        kobs = kcat_KM * Es
+        alpha = 1.0 - np.exp(-kobs * t)
+        return np.clip(alpha, 0, 1)
+    
+    def fit_global(self, df: pd.DataFrame, verbose_callback=None) -> ModelResults:
+        """Global fit with mass transfer"""
+        df_fit = df.copy()
+        
+        if verbose_callback:
+            verbose_callback(f"Model C: 전체 {len(df_fit)}개 데이터 포인트 사용 (필터링 없음)")
+        
+        if len(df_fit) < 5:
+            if verbose_callback:
+                verbose_callback(f"Model C: 피팅 데이터가 충분하지 않습니다. (사용 가능: {len(df_fit)}개)", level="error")
+            return None
+        
+        MW = self.enzyme_mw * 1000
+        df_fit['E_M'] = (df_fit['enzyme_ugml'] / MW) * 1e-6
+        
+        t = df_fit['time_s'].values
+        E = df_fit['E_M'].values
+        y = df_fit['alpha'].values
+        
+        self._t_data = t
+        self._E_data = E
+        
+        def model_func(x_dummy, kcat_KM, km, Gamma0):
+            """Model function for curve_fit"""
+            result = np.zeros_like(self._t_data)
+            for i in range(len(self._t_data)):
+                result[i] = self.model(self._t_data[i], self._E_data[i], kcat_KM, km, Gamma0)
+            return result
+        
+        try:
+            # Better initial guess estimation
+            kobs_estimates = []
+            for conc in df_fit['enzyme_ugml'].unique():
+                subset = df_fit[df_fit['enzyme_ugml'] == conc].sort_values('time_s')
+                if len(subset) >= 3:
+                    early = subset.head(min(5, len(subset)))
+                    t_early = early['time_s'].values
+                    alpha_early = early['alpha'].values
+                    alpha_safe = np.clip(alpha_early, 0.01, 0.99)
+                    y_log = -np.log(1 - alpha_safe)
+                    if len(t_early) >= 2 and t_early[-1] > t_early[0]:
+                        kobs_est = (y_log[-1] - y_log[0]) / (t_early[-1] - t_early[0])
+                        E_conc = subset['E_M'].iloc[0]
+                        if E_conc > 0 and kobs_est > 0:
+                            kcat_KM_est = kobs_est / E_conc
+                            kobs_estimates.append(kcat_KM_est)
+            
+            if len(kobs_estimates) > 0:
+                kcat_KM_guess = np.median(kobs_estimates)
+                kcat_KM_guess = np.clip(kcat_KM_guess, 1e2, 1e10)
+            else:
+                kcat_KM_guess = 1e5
+            
+            p0 = [kcat_KM_guess, 1e-4, 1.0]
+            
+            if verbose_callback:
+                verbose_callback(f"Model C 초기값: kcat/KM = {kcat_KM_guess:.2e} M⁻¹s⁻¹, km = 1e-4 m/s, Γ₀ = 1.0 pmol/cm²")
+            
+            x_dummy = np.arange(len(y))
+            
+            popt, pcov = curve_fit(
+                model_func, x_dummy, y, p0=p0,
+                bounds=([1e3, 1e-6, 0.1], [1e9, 1e-2, 100]),
+                maxfev=20000
+            )
+            
+            kcat_KM_fit, km_fit, Gamma0_fit = popt
+            perr = np.sqrt(np.diag(pcov))
+            
+            y_pred = model_func(x_dummy, kcat_KM_fit, km_fit, Gamma0_fit)
+            residuals = y - y_pred
+            ss_res = np.sum(residuals ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            rmse = np.sqrt(np.mean(residuals ** 2))
+            
+            n = len(y)
+            k = 3
+            if ss_res > 0:
+                log_likelihood = -n/2 * np.log(2*np.pi*ss_res/n) - n/2
+            else:
+                log_likelihood = 0
+            aic = 2*k - 2*log_likelihood
+            bic = k*np.log(n) - 2*log_likelihood
+            
+            params = {'kcat_KM': kcat_KM_fit, 'km': km_fit, 'Gamma0': Gamma0_fit}
+            params_std = {'kcat_KM': perr[0], 'km': perr[1], 'Gamma0': perr[2]}
+            
+            t_full = df['time_s'].values
+            E_full = (df['enzyme_ugml'].values / MW) * 1e-6
+            y_pred_full = np.zeros(len(t_full))
+            for i in range(len(t_full)):
+                y_pred_full[i] = self.model(t_full[i], E_full[i], kcat_KM_fit, km_fit, Gamma0_fit)
+            
+            return ModelResults(
+                name=self.name,
+                params=params,
+                params_std=params_std,
+                aic=aic,
+                bic=bic,
+                r_squared=r_squared,
+                rmse=rmse,
+                predictions=y_pred_full,
+                residuals=df['alpha'].values - y_pred_full
+            )
+            
+        except Exception as e:
+            if verbose_callback:
+                verbose_callback(f"Model C 피팅 오류: {str(e)}", level="error")
+                import traceback
+                verbose_callback(traceback.format_exc(), level="debug")
+            return None
+
+
+class ModelD_ConcentrationDependentFmax:
+    """
+    Model D: Concentration-Dependent Maximum Cleavage (농도 의존적 Fmax)
+    
+    Hypothesis: 효소 농도가 높을수록 더 깊은 겔 층까지 침투하여 더 많은 기질을 절단
+    
+    Physical basis:
+    - 확산 침투 깊이: δ ∝ √(D*t) but also depends on reaction rate
+    - 높은 [E]에서 더 큰 농도 구배 → 더 깊은 침투
+    - 생성물 방출/2차 절단: 높은 [E]에서 작은 조각으로 분해되어 방출 증가
+    
+    Model equation:
+    α(t) = α_max([E]) * [1 - exp(-kobs*t)]
+    
+    where:
+    α_max([E]) = α_∞ * [1 - exp(-k_access * [E])]
+    - α_∞: 무한 효소 농도에서 이론적 최대값 (접근 가능한 전체 기질)
+    - k_access: 효소 농도에 대한 접근성 계수 (M⁻¹)
+    - kobs = (kcat/KM) * [E]
+    
+    Parameters to fit:
+    - kcat_KM: 촉매 효율 (M⁻¹s⁻¹)
+    - alpha_inf: 이론적 최대 절단 비율 (0-1)
+    - k_access: 농도 의존적 접근성 계수 (M⁻¹)
+    """
+    
+    def __init__(self, enzyme_mw: float = 56.6):
+        self.enzyme_mw = enzyme_mw
+        self.name = "Model D: Concentration-Dependent Fmax"
+    
+    def model(self, t: np.ndarray, E_M: float, kcat_KM: float, 
+              alpha_inf: float, k_access: float) -> np.ndarray:
+        """
+        Model with concentration-dependent maximum cleavage
+        """
+        # Concentration-dependent maximum
+        alpha_max = alpha_inf * (1.0 - np.exp(-k_access * E_M))
+        
+        # Time-dependent approach to maximum
+        kobs = kcat_KM * E_M
+        alpha = alpha_max * (1.0 - np.exp(-kobs * t))
+        
+        return np.clip(alpha, 0, 1)
+    
+    def fit_global(self, df: pd.DataFrame, verbose_callback=None) -> ModelResults:
+        """Global fit with concentration-dependent Fmax"""
+        df_fit = df.copy()
+        
+        if verbose_callback:
+            verbose_callback(f"Model D: 전체 {len(df_fit)}개 데이터 포인트 사용")
+        
+        if len(df_fit) < 5:
+            if verbose_callback:
+                verbose_callback(f"Model D: 피팅 데이터가 충분하지 않습니다.", level="error")
+            return None
+        
+        MW = self.enzyme_mw * 1000
+        df_fit['E_M'] = (df_fit['enzyme_ugml'] / MW) * 1e-6
+        
+        t = df_fit['time_s'].values
+        E = df_fit['E_M'].values
+        y = df_fit['alpha'].values
+        
+        self._t_data = t
+        self._E_data = E
+        
+        def model_func(x_dummy, kcat_KM, alpha_inf, k_access):
+            """Model function for curve_fit"""
+            result = np.zeros_like(self._t_data)
+            for i in range(len(self._t_data)):
+                result[i] = self.model(self._t_data[i], self._E_data[i], 
+                                      kcat_KM, alpha_inf, k_access)
+            return result
+        
+        try:
+            # Initial guess
+            kcat_KM_guess = 1e5
+            alpha_inf_guess = 1.0  # assume full cleavage is theoretically possible
+            k_access_guess = 1e6  # M^-1
+            
+            p0 = [kcat_KM_guess, alpha_inf_guess, k_access_guess]
+            
+            if verbose_callback:
+                verbose_callback(f"Model D 초기값: kcat/KM={kcat_KM_guess:.2e}, α_∞={alpha_inf_guess:.2f}, k_access={k_access_guess:.2e}")
+            
+            x_dummy = np.arange(len(y))
+            
+            popt, pcov = curve_fit(
+                model_func, x_dummy, y, p0=p0,
+                bounds=([1e3, 0.5, 1e4], [1e9, 1.0, 1e9]),
+                maxfev=20000
+            )
+            
+            kcat_KM_fit, alpha_inf_fit, k_access_fit = popt
+            perr = np.sqrt(np.diag(pcov))
+            
+            y_pred = model_func(x_dummy, kcat_KM_fit, alpha_inf_fit, k_access_fit)
+            residuals = y - y_pred
+            ss_res = np.sum(residuals ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            rmse = np.sqrt(np.mean(residuals ** 2))
+            
+            n = len(y)
+            k = 3
+            if ss_res > 0:
+                log_likelihood = -n/2 * np.log(2*np.pi*ss_res/n) - n/2
+            else:
+                log_likelihood = 0
+            aic = 2*k - 2*log_likelihood
+            bic = k*np.log(n) - 2*log_likelihood
+            
+            params = {
+                'kcat_KM': kcat_KM_fit,
+                'alpha_inf': alpha_inf_fit,
+                'k_access': k_access_fit
+            }
+            params_std = {
+                'kcat_KM': perr[0],
+                'alpha_inf': perr[1],
+                'k_access': perr[2]
+            }
+            
+            t_full = df['time_s'].values
+            E_full = (df['enzyme_ugml'].values / MW) * 1e-6
+            y_pred_full = np.zeros(len(t_full))
+            for i in range(len(t_full)):
+                y_pred_full[i] = self.model(t_full[i], E_full[i], 
+                                           kcat_KM_fit, alpha_inf_fit, k_access_fit)
+            
+            return ModelResults(
+                name=self.name,
+                params=params,
+                params_std=params_std,
+                aic=aic,
+                bic=bic,
+                r_squared=r_squared,
+                rmse=rmse,
+                predictions=y_pred_full,
+                residuals=df['alpha'].values - y_pred_full
+            )
+            
+        except Exception as e:
+            if verbose_callback:
+                verbose_callback(f"Model D 피팅 오류: {str(e)}", level="error")
+                import traceback
+                verbose_callback(traceback.format_exc(), level="debug")
+            return None
+
+
+class ModelE_ProductInhibition:
+    """
+    Model E: Product Inhibition (생성물 억제)
+    
+    Hypothesis: 절단된 펩타이드 조각(생성물)이 효소를 경쟁적으로 억제
+    
+    Physical basis:
+    - 생성물이 활성 부위에 결합하여 억제
+    - 생성물이 겔/표면에 축적 (느린 확산/방출)
+    - 높은 [E]에서는 2차 절단으로 작은 조각 생성 → 억제 감소
+    
+    Reaction scheme:
+    S + E ⇌ ES → P + E
+    P + E ⇌ EP (inhibition)
+    
+    Michaelis-Menten with competitive product inhibition:
+    v = (kcat * [E] * [S]) / (KM * (1 + [P]/Ki) + [S])
+    
+    For [S] << KM (first order):
+    dS/dt = -(kcat/KM) * [E] * [S] / (1 + [P]/Ki)
+    
+    Assume: [P] = [S0] - [S] = [S0] * α
+    
+    Model equation (simplified):
+    dα/dt = kobs * (1 - α) / (1 + Ki_eff * α)
+    
+    where:
+    - kobs = (kcat/KM) * [E]
+    - Ki_eff = [S0]/Ki (dimensionless inhibition constant)
+    
+    Parameters to fit:
+    - kcat_KM: catalytic efficiency (M⁻¹s⁻¹)
+    - Ki_eff: effective product inhibition constant
+    """
+    
+    def __init__(self, enzyme_mw: float = 56.6):
+        self.enzyme_mw = enzyme_mw
+        self.name = "Model E: Product Inhibition"
+    
+    def model(self, t: np.ndarray, E_M: float, kcat_KM: float, Ki_eff: float) -> np.ndarray:
+        """
+        Model with product inhibition
+        Numerically integrate: dα/dt = kobs*(1-α)/(1 + Ki_eff*α)
+        """
+        kobs = kcat_KM * E_M
+        
+        def dydt(t_val, y):
+            alpha = y[0]
+            if alpha >= 1.0:
+                return [0]
+            # Product inhibition term
+            rate = kobs * (1 - alpha) / (1 + Ki_eff * alpha)
+            return [rate]
+        
+        sol = solve_ivp(dydt, [0, t[-1] if hasattr(t, '__len__') else t], 
+                       [0.0], t_eval=t if hasattr(t, '__len__') else [t], 
+                       method='LSODA', rtol=1e-6)
+        alpha = sol.y[0]
+        return np.clip(alpha, 0, 1)
+    
+    def fit_global(self, df: pd.DataFrame, verbose_callback=None) -> ModelResults:
+        """Global fit with product inhibition"""
+        df_fit = df.copy()
+        
+        if verbose_callback:
+            verbose_callback(f"Model E: 전체 {len(df_fit)}개 데이터 포인트 사용")
+        
+        if len(df_fit) < 5:
+            if verbose_callback:
+                verbose_callback(f"Model E: 피팅 데이터가 충분하지 않습니다.", level="error")
+            return None
+        
+        MW = self.enzyme_mw * 1000
+        df_fit['E_M'] = (df_fit['enzyme_ugml'] / MW) * 1e-6
+        
+        # Group by concentration for fitting
+        conc_list = sorted(df_fit['enzyme_ugml'].unique())
+        
+        all_t = []
+        all_E = []
+        all_y = []
+        
+        for conc in conc_list:
+            subset = df_fit[df_fit['enzyme_ugml'] == conc].sort_values('time_s')
+            all_t.extend(subset['time_s'].values)
+            all_E.extend(subset['E_M'].values)
+            all_y.extend(subset['alpha'].values)
+        
+        t = np.array(all_t)
+        E = np.array(all_E)
+        y = np.array(all_y)
+        
+        self._conc_list = conc_list
+        self._df_fit = df_fit
+        self._MW = MW
+        
+        def model_func(x_dummy, kcat_KM, Ki_eff):
+            """Model function for curve_fit"""
+            result = []
+            for conc in self._conc_list:
+                subset = self._df_fit[self._df_fit['enzyme_ugml'] == conc].sort_values('time_s')
+                t_subset = subset['time_s'].values
+                E_subset = subset['E_M'].iloc[0]
+                
+                alpha_pred = self.model(t_subset, E_subset, kcat_KM, Ki_eff)
+                result.extend(alpha_pred)
+            
+            return np.array(result)
+        
+        try:
+            # Initial guess
+            kcat_KM_guess = 1e5
+            Ki_eff_guess = 1.0
+            
+            p0 = [kcat_KM_guess, Ki_eff_guess]
+            
+            if verbose_callback:
+                verbose_callback(f"Model E 초기값: kcat/KM={kcat_KM_guess:.2e}, Ki_eff={Ki_eff_guess:.2f}")
+            
+            x_dummy = np.arange(len(y))
+            
+            popt, pcov = curve_fit(
+                model_func, x_dummy, y, p0=p0,
+                bounds=([1e3, 0.01], [1e9, 100]),
+                maxfev=20000
+            )
+            
+            kcat_KM_fit, Ki_eff_fit = popt
+            perr = np.sqrt(np.diag(pcov))
+            
+            y_pred = model_func(x_dummy, kcat_KM_fit, Ki_eff_fit)
+            residuals = y - y_pred
+            ss_res = np.sum(residuals ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            rmse = np.sqrt(np.mean(residuals ** 2))
+            
+            n = len(y)
+            k = 2
+            if ss_res > 0:
+                log_likelihood = -n/2 * np.log(2*np.pi*ss_res/n) - n/2
+            else:
+                log_likelihood = 0
+            aic = 2*k - 2*log_likelihood
+            bic = k*np.log(n) - 2*log_likelihood
+            
+            params = {'kcat_KM': kcat_KM_fit, 'Ki_eff': Ki_eff_fit}
+            params_std = {'kcat_KM': perr[0], 'Ki_eff': perr[1]}
+            
+            # Generate predictions for all data
+            y_pred_full = []
+            for conc in sorted(df['enzyme_ugml'].unique()):
+                subset = df[df['enzyme_ugml'] == conc].sort_values('time_s')
+                t_subset = subset['time_s'].values
+                E_subset = (conc / MW) * 1e-6
+                
+                alpha_pred = self.model(t_subset, E_subset, kcat_KM_fit, Ki_eff_fit)
+                y_pred_full.extend(alpha_pred)
+            
+            y_pred_full = np.array(y_pred_full)
+            
+            return ModelResults(
+                name=self.name,
+                params=params,
+                params_std=params_std,
+                aic=aic,
+                bic=bic,
+                r_squared=r_squared,
+                rmse=rmse,
+                predictions=y_pred_full,
+                residuals=df['alpha'].values - y_pred_full
+            )
+            
+        except Exception as e:
+            if verbose_callback:
+                verbose_callback(f"Model E 피팅 오류: {str(e)}", level="error")
+                import traceback
+                verbose_callback(traceback.format_exc(), level="debug")
+            return None
+
+
+class ModelF_EnzymeSurfaceSequestration:
+    """
+    Model F: Enzyme Surface Sequestration/Adsorption (효소 표면 흡착/격리)
+    
+    Hypothesis: 효소가 겔/표면에 비특이적으로 흡착되어 비가역적으로 비활성화
+    
+    Physical basis:
+    - PDA·음전하 표면에 양전하 효소 흡착
+    - 겔 망상구조에 물리적 포획
+    - 높은 [E]에서 포화/경쟁으로 상대적 영향 감소
+    
+    Model:
+    E_free(t) = E0 * exp(-k_ads * t) / (1 + K_ads * E0)
+    
+    Or simplified two-state:
+    - Fast reversible binding: E ⇌ E_bound (K_eq)
+    - Slow irreversible adsorption: E → E_ads (k_ads)
+    
+    Effective enzyme:
+    E_eff([E], t) = [E] * exp(-k_ads * t) / (1 + K_ads * [E])
+    
+    Integrated:
+    α(t) = ∫[0,t] (kcat/KM) * E_eff(τ) dτ
+    
+    Approximate solution:
+    α(t) ≈ (kcat/KM) * [E] / (k_ads * (1 + K_ads*[E])) * [1 - exp(-k_ads*t)]
+    
+    Parameters to fit:
+    - kcat_KM: catalytic efficiency (M⁻¹s⁻¹)
+    - k_ads: adsorption rate constant (s⁻¹)
+    - K_ads: adsorption equilibrium constant (M⁻¹)
+    """
+    
+    def __init__(self, enzyme_mw: float = 56.6):
+        self.enzyme_mw = enzyme_mw
+        self.name = "Model F: Enzyme Surface Sequestration"
+    
+    def model(self, t: np.ndarray, E_M: float, kcat_KM: float, 
+              k_ads: float, K_ads: float) -> np.ndarray:
+        """
+        Model with enzyme surface adsorption/sequestration
+        """
+        # Concentration-dependent adsorption factor
+        ads_factor = 1.0 / (1.0 + K_ads * E_M)
+        
+        # Time-dependent depletion with saturation
+        if k_ads > 1e-6:
+            alpha = (kcat_KM * E_M * ads_factor / k_ads) * (1.0 - np.exp(-k_ads * t))
+        else:
+            # Limit as k_ads → 0 (no adsorption)
+            alpha = kcat_KM * E_M * ads_factor * t
+        
+        return np.clip(alpha, 0, 1)
+    
+    def fit_global(self, df: pd.DataFrame, verbose_callback=None) -> ModelResults:
+        """Global fit with enzyme sequestration"""
+        df_fit = df.copy()
+        
+        if verbose_callback:
+            verbose_callback(f"Model F: 전체 {len(df_fit)}개 데이터 포인트 사용")
+        
+        if len(df_fit) < 5:
+            if verbose_callback:
+                verbose_callback(f"Model F: 피팅 데이터가 충분하지 않습니다.", level="error")
+            return None
+        
+        MW = self.enzyme_mw * 1000
+        df_fit['E_M'] = (df_fit['enzyme_ugml'] / MW) * 1e-6
+        
+        t = df_fit['time_s'].values
+        E = df_fit['E_M'].values
+        y = df_fit['alpha'].values
+        
+        self._t_data = t
+        self._E_data = E
+        
+        def model_func(x_dummy, kcat_KM, k_ads, K_ads):
+            """Model function for curve_fit"""
+            result = np.zeros_like(self._t_data)
+            for i in range(len(self._t_data)):
+                result[i] = self.model(self._t_data[i], self._E_data[i], 
+                                      kcat_KM, k_ads, K_ads)
+            return result
+        
+        try:
+            # Initial guess
+            kcat_KM_guess = 1e5
+            k_ads_guess = 0.1  # s^-1
+            K_ads_guess = 1e6  # M^-1
+            
+            p0 = [kcat_KM_guess, k_ads_guess, K_ads_guess]
+            
+            if verbose_callback:
+                verbose_callback(f"Model F 초기값: kcat/KM={kcat_KM_guess:.2e}, k_ads={k_ads_guess:.2f}, K_ads={K_ads_guess:.2e}")
+            
+            x_dummy = np.arange(len(y))
+            
+            popt, pcov = curve_fit(
+                model_func, x_dummy, y, p0=p0,
+                bounds=([1e3, 0.001, 1e3], [1e9, 10, 1e9]),
+                maxfev=20000
+            )
+            
+            kcat_KM_fit, k_ads_fit, K_ads_fit = popt
+            perr = np.sqrt(np.diag(pcov))
+            
+            y_pred = model_func(x_dummy, kcat_KM_fit, k_ads_fit, K_ads_fit)
+            residuals = y - y_pred
+            ss_res = np.sum(residuals ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            rmse = np.sqrt(np.mean(residuals ** 2))
+            
+            n = len(y)
+            k = 3
+            if ss_res > 0:
+                log_likelihood = -n/2 * np.log(2*np.pi*ss_res/n) - n/2
+            else:
+                log_likelihood = 0
+            aic = 2*k - 2*log_likelihood
+            bic = k*np.log(n) - 2*log_likelihood
+            
+            params = {
+                'kcat_KM': kcat_KM_fit,
+                'k_ads': k_ads_fit,
+                'K_ads': K_ads_fit
+            }
+            params_std = {
+                'kcat_KM': perr[0],
+                'k_ads': perr[1],
+                'K_ads': perr[2]
+            }
+            
+            t_full = df['time_s'].values
+            E_full = (df['enzyme_ugml'].values / MW) * 1e-6
+            y_pred_full = np.zeros(len(t_full))
+            for i in range(len(t_full)):
+                y_pred_full[i] = self.model(t_full[i], E_full[i], 
+                                           kcat_KM_fit, k_ads_fit, K_ads_fit)
+            
+            return ModelResults(
+                name=self.name,
+                params=params,
+                params_std=params_std,
+                aic=aic,
+                bic=bic,
+                r_squared=r_squared,
+                rmse=rmse,
+                predictions=y_pred_full,
+                residuals=df['alpha'].values - y_pred_full
+            )
+            
+        except Exception as e:
+            if verbose_callback:
+                verbose_callback(f"Model F 피팅 오류: {str(e)}", level="error")
+                import traceback
+                verbose_callback(traceback.format_exc(), level="debug")
+            return None
+
