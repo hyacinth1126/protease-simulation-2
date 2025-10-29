@@ -32,109 +32,331 @@ class ModelResults:
     residuals: np.ndarray
 
 
-class DataNormalizer:
-    """Normalize fluorescence data to fraction cleaved"""
+class UnitStandardizer:
+    """
+    Step 2: Standardize units
+    
+    1) Time: min/sec → time_s (seconds)
+    2) Concentration: μg/mL, ng/mL → μM, nM (molar concentration)
+       - Requires molecular weight (MW) for conversion
+    3) Fluorescence: RFU or FL_intensity (no conversion, just column selection)
+    """
+    
+    def __init__(self, enzyme_mw: float = 56.6):
+        """
+        Parameters:
+        - enzyme_mw: Molecular weight in kDa (default: 56.6 kDa for Kgp)
+        """
+        self.enzyme_mw = enzyme_mw  # kDa
+    
+    def standardize(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Standardize units in the dataframe
+        
+        Steps:
+        1. Time standardization: min → s
+        2. Concentration standardization: mass → molar (if needed)
+        3. Fluorescence column selection: RFU or FL_intensity
+        
+        Parameters:
+        - df: Raw DataFrame
+        
+        Returns:
+        - DataFrame with standardized units
+        """
+        df_std = df.copy()
+        
+        # Step 1: Time standardization
+        if 'time_min' in df_std.columns:
+            df_std['time_s'] = df_std['time_min'] * 60  # min → s
+        elif 'time_s' not in df_std.columns:
+            # Try to find time column
+            time_cols = [col for col in df_std.columns if 'time' in col.lower()]
+            if len(time_cols) > 0:
+                df_std['time_s'] = df_std[time_cols[0]]
+        
+        # Step 2: Fluorescence column standardization
+        if 'RFU' in df_std.columns and 'FL_intensity' not in df_std.columns:
+            df_std['FL_intensity'] = df_std['RFU']
+        elif 'FL_intensity' not in df_std.columns:
+            # Try to find fluorescence column
+            fluor_cols = [col for col in df_std.columns 
+                         if any(keyword in col.upper() for keyword in ['FLUOR', 'RFU', 'FL_', 'INTENSITY'])]
+            if len(fluor_cols) > 0:
+                df_std['FL_intensity'] = df_std[fluor_cols[0]]
+        
+        # Step 3: Concentration standardization (mass → molar)
+        conc_col = None
+        conc_unit_type = None
+        
+        # Check for existing molar concentration columns
+        if 'peptide_uM' in df_std.columns:
+            conc_col = 'peptide_uM'
+            conc_unit_type = 'molar'
+            target_col = 'enzyme_uM'
+        elif 'enzyme_uM' in df_std.columns:
+            conc_col = 'enzyme_uM'
+            conc_unit_type = 'molar'
+            target_col = 'enzyme_uM'
+        elif 'E_nM' in df_std.columns:
+            conc_col = 'E_nM'
+            conc_unit_type = 'molar'
+            target_col = 'E_nM'
+        # Check for mass concentration columns
+        elif 'enzyme_ugml' in df_std.columns or 'enzyme_ug/mL' in df_std.columns:
+            conc_col = 'enzyme_ugml' if 'enzyme_ugml' in df_std.columns else 'enzyme_ug/mL'
+            conc_unit_type = 'mass'
+            target_col = 'enzyme_uM'
+        elif 'peptide_ugml' in df_std.columns or 'peptide_ug/mL' in df_std.columns:
+            conc_col = 'peptide_ugml' if 'peptide_ugml' in df_std.columns else 'peptide_ug/mL'
+            conc_unit_type = 'mass'
+            target_col = 'peptide_uM'
+        elif 'enzyme_ngml' in df_std.columns or 'enzyme_ng/mL' in df_std.columns:
+            conc_col = 'enzyme_ngml' if 'enzyme_ngml' in df_std.columns else 'enzyme_ng/mL'
+            conc_unit_type = 'mass'
+            target_col = 'enzyme_nM'
+        
+        # Convert mass to molar if needed
+        if conc_col and conc_unit_type == 'mass':
+            MW_g_per_mol = self.enzyme_mw * 1000  # kDa → g/mol
+            
+            if 'uM' in target_col:
+                # Convert to μM
+                df_std[target_col] = (df_std[conc_col] / MW_g_per_mol) * 1e6
+            elif 'nM' in target_col:
+                # Convert to nM
+                df_std[target_col] = (df_std[conc_col] / MW_g_per_mol) * 1e9
+            
+            # Store original column name for reference
+            df_std['_original_conc_col'] = conc_col
+        elif conc_col and conc_unit_type == 'molar':
+            # Already in molar, just ensure target_col exists
+            if target_col not in df_std.columns:
+                df_std[target_col] = df_std[conc_col]
+        
+        return df_std
+
+
+class RegionDivider:
+    """
+    Step 4: Divide kinetic regions
+    
+    Divides normalized data into:
+    1. Initial linear region
+    2. Exponential growth region  
+    3. Plateau region
+    
+    Note: Specific logic to be provided later by user
+    """
     
     def __init__(self):
         pass
-        
-    def normalize(self, df: pd.DataFrame) -> pd.DataFrame:
+    
+    def divide_regions(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Normalize fluorescence: α(t) = (F(t) - F0) / (Fmax - F0)
-        
-        Uses exponential fitting to determine Fmax (asymptote):
-        F(t) = F0 + A * (1 - exp(-k*t))
-        Fmax = F0 + A (asymptote)
+        Divide kinetic data into regions
         
         Parameters:
-        - df: DataFrame with flexible column names
+        - df: Normalized DataFrame (must have 'alpha' or 'alpha_temp', 'time_s', etc.)
         
         Returns:
-        - DataFrame with additional columns: alpha, F0, Fmax, fit_k
+        - DataFrame with additional 'region' column
         """
-        # Detect column names automatically
-        time_col = 'time_s' if 'time_s' in df.columns else 'time_min'
-        conc_col = 'enzyme_ugml' if 'enzyme_ugml' in df.columns else 'peptide_uM' if 'peptide_uM' in df.columns else 'E_nM'
-        fluor_col = 'FL_intensity' if 'FL_intensity' in df.columns else 'RFU' if 'RFU' in df.columns else 'fluor'
+        df_regions = df.copy()
         
-        # Store for later use
-        self.time_col = time_col
-        self.conc_col = conc_col
-        self.fluor_col = fluor_col
+        # Use alpha if available, otherwise use alpha_temp
+        alpha_col = 'alpha' if 'alpha' in df_regions.columns else 'alpha_temp'
         
-        def normalize_group(g):
-            g_sorted = g.sort_values(time_col)
-            
-            # F0: initial fluorescence (t=0)
-            F0_mask = g_sorted[time_col] == 0
-            if F0_mask.any():
-                F0 = float(g_sorted.loc[F0_mask, fluor_col].iloc[0])
+        # TODO: Implement region division logic
+        # For now, just add placeholder column
+        df_regions['region'] = 'unknown'
+        
+        return df_regions
+
+
+class DataNormalizer:
+    """
+    Step 3: Normalization (two stages)
+    
+    Stage 1: Temporary normalization (model-free threshold)
+    - F0 = minimum fluorescence value
+    - Fmax = maximum fluorescence value
+    
+    Stage 2: Final normalization (after region division)
+    - F0 = minimum fluorescence value (same as stage 1)
+    - Fmax = plateau region average (or F∞ from exponential region if no plateau)
+    """
+    
+    def __init__(self):
+        self.time_col = None
+        self.conc_col = None
+        self.fluor_col = None
+    
+    def _detect_columns(self, df: pd.DataFrame):
+        """Detect and store column names"""
+        # Time column
+        self.time_col = 'time_s' if 'time_s' in df.columns else 'time_min'
+        
+        # Concentration column - prioritize molar concentration units
+        if 'peptide_uM' in df.columns:
+            self.conc_col = 'peptide_uM'
+            self.conc_unit_type = 'molar'  # uM
+        elif 'enzyme_uM' in df.columns:
+            self.conc_col = 'enzyme_uM'
+            self.conc_unit_type = 'molar'  # uM
+        elif 'E_nM' in df.columns:
+            self.conc_col = 'E_nM'
+            self.conc_unit_type = 'molar'  # nM
+        elif 'enzyme_ugml' in df.columns:
+            self.conc_col = 'enzyme_ugml'
+            self.conc_unit_type = 'mass'  # μg/mL
+        else:
+            # Try to find any column that might be concentration
+            conc_cols = [col for col in df.columns 
+                        if 'time' not in col.lower() and 'fluor' not in col.lower() 
+                        and 'FL_' not in col and 'intensity' not in col.lower() 
+                        and 'RFU' not in col and 'region' not in col.lower()]
+            if len(conc_cols) > 0:
+                self.conc_col = conc_cols[0]
+                self.conc_unit_type = 'unknown'
             else:
-                F0 = float(g_sorted[fluor_col].iloc[0])
+                self.conc_col = 'concentration'
+                self.conc_unit_type = 'unknown'
+        
+        # Fluorescence column
+        self.fluor_col = 'FL_intensity' if 'FL_intensity' in df.columns else 'RFU' if 'RFU' in df.columns else 'fluor'
+    
+    def normalize_temporary(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Stage 1: Temporary normalization using model-free threshold method
+        
+        F0 = minimum fluorescence value (per concentration)
+        Fmax = maximum fluorescence value (per concentration)
+        
+        Parameters:
+        - df: DataFrame with standardized units
+        
+        Returns:
+        - DataFrame with temporary alpha, F0_temp, Fmax_temp columns
+        """
+        self._detect_columns(df)
+        df_temp = df.copy()
+        
+        def temp_normalize_group(g):
+            g_sorted = g.sort_values(self.time_col)
             
-            # Fit exponential to determine Fmax (asymptote)
-            # F(t) = F0 + A * (1 - exp(-k*t))
-            t_data = g_sorted[time_col].values
-            F_data = g_sorted[fluor_col].values
+            # F0: minimum fluorescence value
+            F0_temp = float(g_sorted[self.fluor_col].min())
             
-            try:
-                # Exponential fit function
-                def exp_func(t, A, k):
-                    return F0 + A * (1 - np.exp(-k * t))
+            # Fmax: maximum fluorescence value
+            Fmax_temp = float(g_sorted[self.fluor_col].max())
+            
+            # Ensure Fmax > F0
+            if Fmax_temp <= F0_temp:
+                Fmax_temp = F0_temp + 100
+            
+            # Calculate temporary alpha
+            g = g_sorted.copy()
+            g['alpha_temp'] = (g[self.fluor_col] - F0_temp) / (Fmax_temp - F0_temp)
+            g['alpha_temp'] = g['alpha_temp'].clip(0, 1)
+            g['F0_temp'] = F0_temp
+            g['Fmax_temp'] = Fmax_temp
+            
+            # Store column names
+            g['time_col_name'] = self.time_col
+            g['conc_col_name'] = self.conc_col
+            g['fluor_col_name'] = self.fluor_col
+            
+            return g
+        
+        df_normalized = df_temp.groupby(self.conc_col, group_keys=False).apply(temp_normalize_group)
+        return df_normalized
+    
+    def normalize_final(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Stage 2: Final normalization using region information
+        
+        F0 = minimum fluorescence value (same as temporary)
+        Fmax = plateau region average (or F∞ from exponential region if no plateau)
+        
+        Parameters:
+        - df: DataFrame with temporary normalization and region division
+        
+        Returns:
+        - DataFrame with final alpha, F0, Fmax columns
+        """
+        self._detect_columns(df)
+        df_final = df.copy()
+        
+        def final_normalize_group(g):
+            g_sorted = g.sort_values(self.time_col)
+            
+            # F0: same as temporary (minimum)
+            F0 = float(g_sorted['F0_temp'].iloc[0])
+            
+            # Fmax: determine based on region
+            if 'region' not in g_sorted.columns:
+                # No region info, fallback to temporary Fmax
+                Fmax = float(g_sorted['Fmax_temp'].iloc[0])
+                region_used = 'fallback_temp'
+            else:
+                # Check if plateau region exists
+                plateau_data = g_sorted[g_sorted['region'] == 'plateau']
                 
-                # Initial guess: A = max change, k = 0.1 (moderate rate)
-                A_guess = F_data[-1] - F0 if len(F_data) > 0 else 1000
-                p0 = [A_guess, 0.1]
-                
-                # Fit with bounds
-                popt, pcov = curve_fit(
-                    exp_func, t_data, F_data, 
-                    p0=p0, 
-                    bounds=([0, 0.001], [np.inf, 10]),
-                    maxfev=5000
-                )
-                
-                A_fit, k_fit = popt
-                Fmax = F0 + A_fit  # Asymptote
-                Fmax_std = np.sqrt(np.diag(pcov))[0]  # Uncertainty in A
-                
-                # Generate fitted curve for visualization
-                t_fit = np.linspace(0, t_data.max(), 100)
-                F_fit = exp_func(t_fit, A_fit, k_fit)
-                
-            except Exception as e:
-                # Fallback: use average of last 3 points
-                Fmax = float(g_sorted[fluor_col].tail(3).mean())
-                Fmax_std = float(g_sorted[fluor_col].tail(3).std())
-                k_fit = 0.1  # Default
-                t_fit = np.linspace(0, t_data.max(), 100)
-                F_fit = np.full_like(t_fit, Fmax)
+                if len(plateau_data) > 0:
+                    # Use plateau region average
+                    Fmax = float(plateau_data[self.fluor_col].mean())
+                    region_used = 'plateau_mean'
+                else:
+                    # No plateau, fit exponential to exponential region
+                    exp_data = g_sorted[g_sorted['region'] == 'exponential']
+                    
+                    if len(exp_data) >= 3:
+                        # Fit exponential to determine F∞
+                        try:
+                            t_data = exp_data[self.time_col].values
+                            F_data = exp_data[self.fluor_col].values
+                            
+                            def exp_func(t, A, k):
+                                return F0 + A * (1 - np.exp(-k * t))
+                            
+                            A_guess = F_data[-1] - F0 if len(F_data) > 0 else 1000
+                            p0 = [A_guess, 0.1]
+                            
+                            popt, _ = curve_fit(
+                                exp_func, t_data, F_data,
+                                p0=p0,
+                                bounds=([0, 0.001], [np.inf, 10]),
+                                maxfev=5000
+                            )
+                            
+                            A_fit, _ = popt
+                            Fmax = F0 + A_fit  # F∞
+                            region_used = 'exponential_Finf'
+                        except:
+                            # Fallback to maximum
+                            Fmax = float(g_sorted[self.fluor_col].max())
+                            region_used = 'fallback_max'
+                    else:
+                        # Not enough exponential data, use maximum
+                        Fmax = float(g_sorted[self.fluor_col].max())
+                        region_used = 'fallback_max'
             
             # Ensure Fmax > F0
             if Fmax <= F0:
                 Fmax = F0 + 100
             
-            # Calculate fraction cleaved
+            # Calculate final alpha
             g = g_sorted.copy()
-            g['alpha'] = (g[fluor_col] - F0) / (Fmax - F0)
+            g['alpha'] = (g[self.fluor_col] - F0) / (Fmax - F0)
             g['alpha'] = g['alpha'].clip(0, 1)
             g['F0'] = F0
             g['Fmax'] = Fmax
-            g['Fmax_std'] = Fmax_std
-            g['fit_k'] = k_fit
-            
-            # Store fitted curve for plotting
-            g['t_fit'] = [t_fit] * len(g)
-            g['F_fit'] = [F_fit] * len(g)
-            
-            #Store original column names for later use
-            g['time_col_name'] = time_col
-            g['conc_col_name'] = conc_col
-            g['fluor_col_name'] = fluor_col
+            g['Fmax_method'] = region_used
             
             return g
         
-        df_normalized = df.groupby(conc_col, group_keys=False).apply(normalize_group)
+        df_normalized = df_final.groupby(self.conc_col, group_keys=False).apply(final_normalize_group)
         return df_normalized
 
 
@@ -215,7 +437,17 @@ class ModelA_SubstrateDepletion:
         
         # Convert enzyme concentration to M
         MW = self.enzyme_mw * 1000  # g/mol
-        df_fit['E_M'] = (df_fit['enzyme_ugml'] / MW) * 1e-6  # ug/mL to M
+        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        
+        if 'uM' in conc_col:
+            # Already in μM, convert to M
+            df_fit['E_M'] = df_fit[conc_col] * 1e-6
+        elif 'nM' in conc_col:
+            # Already in nM, convert to M
+            df_fit['E_M'] = df_fit[conc_col] * 1e-9
+        else:
+            # Mass concentration (μg/mL), convert to M
+            df_fit['E_M'] = (df_fit[conc_col] / MW) * 1e-6
         
         t = df_fit['time_s'].values
         E = df_fit['E_M'].values
@@ -301,7 +533,14 @@ class ModelA_SubstrateDepletion:
             
             # Generate full predictions for all data (including saturated)
             t_full = df['time_s'].values
-            E_full = (df['enzyme_ugml'].values / MW) * 1e-6
+            conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+            
+            if 'uM' in conc_col:
+                E_full = df[conc_col].values * 1e-6
+            elif 'nM' in conc_col:
+                E_full = df[conc_col].values * 1e-9
+            else:
+                E_full = (df[conc_col].values / MW) * 1e-6
             y_pred_full = np.zeros(len(t_full))
             for i in range(len(t_full)):
                 kobs = kcat_KM_fit * E_full[i]
@@ -380,7 +619,14 @@ class ModelB_EnzymeDeactivation:
             return None
         
         MW = self.enzyme_mw * 1000
-        df_fit['E_M'] = (df_fit['enzyme_ugml'] / MW) * 1e-6
+        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        
+        if 'uM' in conc_col:
+            df_fit['E_M'] = df_fit[conc_col] * 1e-6
+        elif 'nM' in conc_col:
+            df_fit['E_M'] = df_fit[conc_col] * 1e-9
+        else:
+            df_fit['E_M'] = (df_fit[conc_col] / MW) * 1e-6
         
         t = df_fit['time_s'].values
         E = df_fit['E_M'].values
@@ -456,7 +702,14 @@ class ModelB_EnzymeDeactivation:
             params_std = {'kcat_KM': perr[0], 'kd': perr[1]}
             
             t_full = df['time_s'].values
-            E_full = (df['enzyme_ugml'].values / MW) * 1e-6
+            conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+            
+            if 'uM' in conc_col:
+                E_full = df[conc_col].values * 1e-6
+            elif 'nM' in conc_col:
+                E_full = df[conc_col].values * 1e-9
+            else:
+                E_full = (df[conc_col].values / MW) * 1e-6
             y_pred_full = np.zeros(len(t_full))
             for i in range(len(t_full)):
                 y_pred_full[i] = self.model(t_full[i], E_full[i], kcat_KM_fit, kd_fit)
@@ -542,7 +795,14 @@ class ModelC_MassTransfer:
             return None
         
         MW = self.enzyme_mw * 1000
-        df_fit['E_M'] = (df_fit['enzyme_ugml'] / MW) * 1e-6
+        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        
+        if 'uM' in conc_col:
+            df_fit['E_M'] = df_fit[conc_col] * 1e-6
+        elif 'nM' in conc_col:
+            df_fit['E_M'] = df_fit[conc_col] * 1e-9
+        else:
+            df_fit['E_M'] = (df_fit[conc_col] / MW) * 1e-6
         
         t = df_fit['time_s'].values
         E = df_fit['E_M'].values
@@ -618,7 +878,14 @@ class ModelC_MassTransfer:
             params_std = {'kcat_KM': perr[0], 'km': perr[1], 'Gamma0': perr[2]}
             
             t_full = df['time_s'].values
-            E_full = (df['enzyme_ugml'].values / MW) * 1e-6
+            conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+            
+            if 'uM' in conc_col:
+                E_full = df[conc_col].values * 1e-6
+            elif 'nM' in conc_col:
+                E_full = df[conc_col].values * 1e-9
+            else:
+                E_full = (df[conc_col].values / MW) * 1e-6
             y_pred_full = np.zeros(len(t_full))
             for i in range(len(t_full)):
                 y_pred_full[i] = self.model(t_full[i], E_full[i], kcat_KM_fit, km_fit, Gamma0_fit)
@@ -700,7 +967,14 @@ class ModelD_ConcentrationDependentFmax:
             return None
         
         MW = self.enzyme_mw * 1000
-        df_fit['E_M'] = (df_fit['enzyme_ugml'] / MW) * 1e-6
+        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        
+        if 'uM' in conc_col:
+            df_fit['E_M'] = df_fit[conc_col] * 1e-6
+        elif 'nM' in conc_col:
+            df_fit['E_M'] = df_fit[conc_col] * 1e-9
+        else:
+            df_fit['E_M'] = (df_fit[conc_col] / MW) * 1e-6
         
         t = df_fit['time_s'].values
         E = df_fit['E_M'].values
@@ -767,7 +1041,14 @@ class ModelD_ConcentrationDependentFmax:
             }
             
             t_full = df['time_s'].values
-            E_full = (df['enzyme_ugml'].values / MW) * 1e-6
+            conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+            
+            if 'uM' in conc_col:
+                E_full = df[conc_col].values * 1e-6
+            elif 'nM' in conc_col:
+                E_full = df[conc_col].values * 1e-9
+            else:
+                E_full = (df[conc_col].values / MW) * 1e-6
             y_pred_full = np.zeros(len(t_full))
             for i in range(len(t_full)):
                 y_pred_full[i] = self.model(t_full[i], E_full[i], 
@@ -866,17 +1147,24 @@ class ModelE_ProductInhibition:
             return None
         
         MW = self.enzyme_mw * 1000
-        df_fit['E_M'] = (df_fit['enzyme_ugml'] / MW) * 1e-6
+        conc_col = df_fit['conc_col_name'].iloc[0] if 'conc_col_name' in df_fit.columns else 'enzyme_ugml'
+        
+        if 'uM' in conc_col:
+            df_fit['E_M'] = df_fit[conc_col] * 1e-6
+        elif 'nM' in conc_col:
+            df_fit['E_M'] = df_fit[conc_col] * 1e-9
+        else:
+            df_fit['E_M'] = (df_fit[conc_col] / MW) * 1e-6
         
         # Group by concentration for fitting
-        conc_list = sorted(df_fit['enzyme_ugml'].unique())
+        conc_list = sorted(df_fit[conc_col].unique())
         
         all_t = []
         all_E = []
         all_y = []
         
         for conc in conc_list:
-            subset = df_fit[df_fit['enzyme_ugml'] == conc].sort_values('time_s')
+            subset = df_fit[df_fit[conc_col] == conc].sort_values('time_s')
             all_t.extend(subset['time_s'].values)
             all_E.extend(subset['E_M'].values)
             all_y.extend(subset['alpha'].values)
@@ -887,13 +1175,14 @@ class ModelE_ProductInhibition:
         
         self._conc_list = conc_list
         self._df_fit = df_fit
+        self._conc_col = conc_col
         self._MW = MW
         
         def model_func(x_dummy, kcat_KM, Ki_eff):
             """Model function for curve_fit"""
             result = []
             for conc in self._conc_list:
-                subset = self._df_fit[self._df_fit['enzyme_ugml'] == conc].sort_values('time_s')
+                subset = self._df_fit[self._df_fit[self._conc_col] == conc].sort_values('time_s')
                 t_subset = subset['time_s'].values
                 E_subset = subset['E_M'].iloc[0]
                 
@@ -944,10 +1233,19 @@ class ModelE_ProductInhibition:
             
             # Generate predictions for all data
             y_pred_full = []
-            for conc in sorted(df['enzyme_ugml'].unique()):
-                subset = df[df['enzyme_ugml'] == conc].sort_values('time_s')
+            conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+            
+            for conc in sorted(df[conc_col].unique()):
+                subset = df[df[conc_col] == conc].sort_values('time_s')
                 t_subset = subset['time_s'].values
-                E_subset = (conc / MW) * 1e-6
+                
+                # Convert concentration to M
+                if 'uM' in conc_col:
+                    E_subset = conc * 1e-6
+                elif 'nM' in conc_col:
+                    E_subset = conc * 1e-9
+                else:
+                    E_subset = (conc / MW) * 1e-6
                 
                 alpha_pred = self.model(t_subset, E_subset, kcat_KM_fit, Ki_eff_fit)
                 y_pred_full.extend(alpha_pred)
@@ -1041,7 +1339,14 @@ class ModelF_EnzymeSurfaceSequestration:
             return None
         
         MW = self.enzyme_mw * 1000
-        df_fit['E_M'] = (df_fit['enzyme_ugml'] / MW) * 1e-6
+        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        
+        if 'uM' in conc_col:
+            df_fit['E_M'] = df_fit[conc_col] * 1e-6
+        elif 'nM' in conc_col:
+            df_fit['E_M'] = df_fit[conc_col] * 1e-9
+        else:
+            df_fit['E_M'] = (df_fit[conc_col] / MW) * 1e-6
         
         t = df_fit['time_s'].values
         E = df_fit['E_M'].values
@@ -1108,7 +1413,14 @@ class ModelF_EnzymeSurfaceSequestration:
             }
             
             t_full = df['time_s'].values
-            E_full = (df['enzyme_ugml'].values / MW) * 1e-6
+            conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+            
+            if 'uM' in conc_col:
+                E_full = df[conc_col].values * 1e-6
+            elif 'nM' in conc_col:
+                E_full = df[conc_col].values * 1e-9
+            else:
+                E_full = (df[conc_col].values / MW) * 1e-6
             y_pred_full = np.zeros(len(t_full))
             for i in range(len(t_full)):
                 y_pred_full[i] = self.model(t_full[i], E_full[i], 

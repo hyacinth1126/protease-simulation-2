@@ -10,7 +10,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from analysis import (
+    UnitStandardizer,
     DataNormalizer,
+    RegionDivider,
     ModelA_SubstrateDepletion,
     ModelB_EnzymeDeactivation,
     ModelC_MassTransfer,
@@ -79,6 +81,7 @@ def main():
         help="컬럼: time_s, enzyme_ugml, FL_intensity, SD"
     )
     
+    # Step 1: Load raw data
     if uploaded_file is not None:
         df_raw = pd.read_csv(uploaded_file)
     else:
@@ -90,21 +93,43 @@ def main():
             st.error("데이터 파일을 찾을 수 없습니다. CSV 파일을 업로드해주세요.")
             st.stop()
     
-    # Standardize column names
-    if 'time_min' in df_raw.columns:
-        df_raw['time_s'] = df_raw['time_min']
-    if 'peptide_uM' in df_raw.columns:
-        df_raw['enzyme_ugml'] = df_raw['peptide_uM'] * 1.0
-    if 'RFU' in df_raw.columns:
-        df_raw['FL_intensity'] = df_raw['RFU']
+    # Step 2: Standardize units
+    standardizer = UnitStandardizer(enzyme_mw=enzyme_mw)
+    df_standardized = standardizer.standardize(df_raw)
     
     # Store time unit for later use
     time_unit = 'min' if 'time_min' in df_raw.columns else 's'
     st.session_state['time_unit'] = time_unit
     
-    # Normalize data
+    # Step 3-4: Iterative normalization and region division
     normalizer = DataNormalizer()
-    df = normalizer.normalize(df_raw)
+    region_divider = RegionDivider()
+    
+    # Configuration: number of iterations (minimum 2)
+    max_iterations = st.sidebar.number_input(
+        "정규화-구간 반복 횟수",
+        min_value=2,
+        max_value=10,
+        value=2,
+        step=1,
+        help="최종 정규화와 구간 구분을 반복할 횟수 (최소 2번)"
+    )
+    
+    # Step 3-1: Initial temporary normalization (model-free threshold)
+    df_current = normalizer.normalize_temporary(df_standardized)
+    
+    # Iterative loop: Divide regions → Final normalization → Divide regions → ...
+    for iteration in range(max_iterations):
+        with st.sidebar:
+            st.info(f"🔄 반복 {iteration + 1}/{max_iterations}")
+        
+        # Step 4: Divide regions
+        df_current = region_divider.divide_regions(df_current)
+        
+        # Step 3-2: Final normalization (using current region information)
+        df_current = normalizer.normalize_final(df_current)
+    
+    df = df_current
     
     # Display data
     st.subheader("📊 데이터 미리보기")
@@ -117,7 +142,15 @@ def main():
     else:
         time_display = f"0 - {df['time_s'].max():.0f} 초" if df['time_s'].max() < 100 else f"0 - {df['time_s'].max()/60:.1f} 분"
         time_label = "시간 (초)"
-    conc_unit = "μM" if 'peptide_uM' in df_raw.columns else "μg/mL"
+    # Determine concentration unit from normalized data
+    conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+    if 'uM' in conc_col:
+        conc_unit = "μM"
+    elif 'nM' in conc_col:
+        conc_unit = "nM"
+    else:
+        conc_unit = "μg/mL"
+    
     st.session_state['time_label'] = time_label
     st.session_state['conc_unit'] = conc_unit
     
@@ -125,7 +158,7 @@ def main():
     with col1:
         st.metric("데이터 포인트", len(df))
     with col2:
-        st.metric(f"농도 조건 ({conc_unit})", df['enzyme_ugml'].nunique())
+        st.metric(f"농도 조건 ({conc_unit})", df[conc_col].nunique())
     with col3:
         st.metric("시간 범위", time_display)
     
@@ -183,24 +216,28 @@ def main():
         """)
         
         # Model selection
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
             st.markdown("**기본 모델**")
             fit_model_a = st.checkbox("모델 A: 기질 고갈", value=True)
+            st.caption("✓ 1차 반응 및 기질 고갈")
+            
             fit_model_b = st.checkbox("모델 B: 효소 비활성화", value=True)
+            st.caption("✓ 효소 비활성화 & 시간 의존")
+            
             fit_model_c = st.checkbox("모델 C: 물질전달 제한", value=True)
+            st.caption("✓ 확산 제한 & 접근성 제약")
         
         with col2:
             st.markdown("**확장 모델 (Fmax 의존성)**")
             fit_model_d = st.checkbox("모델 D: 농도 의존 Fmax", value=True)
+            st.caption("✓ 겔 침투 깊이 & 2차 절단")
+            
             fit_model_e = st.checkbox("모델 E: 생성물 억제", value=True)
+            st.caption("✓ 생성물 축적 & 경쟁 억제")
+            
             fit_model_f = st.checkbox("모델 F: 효소 흡착/격리", value=True)
-        
-        with col3:
-            st.markdown("**모델 특징**")
-            st.caption("D: 겔 침투 깊이 & 2차 절단")
-            st.caption("E: 생성물 축적 & 경쟁 억제")
-            st.caption("F: 표면 흡착 & 비가역 결합")
+            st.caption("✓ 표면 흡착 & 비가역 결합")
         
         if st.button("🚀 글로벌 피팅 실행", type="primary"):
             results = []

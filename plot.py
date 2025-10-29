@@ -23,8 +23,9 @@ class Visualizer:
         
         colors = px.colors.qualitative.Set1
         
-        for idx, conc in enumerate(sorted(df['enzyme_ugml'].unique())):
-            subset = df[df['enzyme_ugml'] == conc]
+        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        for idx, conc in enumerate(sorted(df[conc_col].unique())):
+            subset = df[df[conc_col] == conc]
             color = colors[idx % len(colors)]
             
             # Plot experimental data
@@ -80,10 +81,11 @@ class Visualizer:
         fig = go.Figure()
         
         colors = px.colors.qualitative.Set1
-        concentrations = sorted(df['enzyme_ugml'].unique())
+        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        concentrations = sorted(df[conc_col].unique())
         
         for idx, conc in enumerate(concentrations):
-            subset = df[df['enzyme_ugml'] == conc]
+            subset = df[df[conc_col] == conc]
             color = colors[idx % len(colors)]
             
             # Plot data points
@@ -121,8 +123,9 @@ class Visualizer:
         colors = px.colors.qualitative.Set1
         
         # Plot experimental data
-        for idx, conc in enumerate(sorted(df['enzyme_ugml'].unique())):
-            subset = df[df['enzyme_ugml'] == conc]
+        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        for idx, conc in enumerate(sorted(df[conc_col].unique())):
+            subset = df[df[conc_col] == conc]
             color = colors[idx % len(colors)]
             
             fig.add_trace(go.Scatter(
@@ -192,8 +195,9 @@ class Visualizer:
         rates = []
         concentrations = []
         
-        for conc in sorted(df['enzyme_ugml'].unique()):
-            subset = initial_data[initial_data['enzyme_ugml'] == conc]
+        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        for conc in sorted(df[conc_col].unique()):
+            subset = initial_data[initial_data[conc_col] == conc]
             if len(subset) >= 2:
                 # Linear fit to get slope
                 coeffs = np.polyfit(subset['time_s'], subset['alpha'], 1)
@@ -251,8 +255,9 @@ class Visualizer:
         colors = px.colors.qualitative.Set1
         
         # Plot experimental data
-        for idx, conc in enumerate(sorted(df['enzyme_ugml'].unique())):
-            subset = df[df['enzyme_ugml'] == conc]
+        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        for idx, conc in enumerate(sorted(df[conc_col].unique())):
+            subset = df[df[conc_col] == conc]
             color = colors[idx % len(colors)]
             
             fig.add_trace(go.Scatter(
