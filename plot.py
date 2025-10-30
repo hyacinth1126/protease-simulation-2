@@ -24,6 +24,8 @@ class Visualizer:
         colors = px.colors.qualitative.Set1
         
         conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        base = conc_col.split('_')[0].lower()
+        entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
         for idx, conc in enumerate(sorted(df[conc_col].unique())):
             subset = df[df[conc_col] == conc]
             color = colors[idx % len(colors)]
@@ -33,7 +35,7 @@ class Visualizer:
                 x=subset['time_s'],
                 y=subset['FL_intensity'],
                 mode='markers',
-                name=f'{conc} {conc_unit} (데이터)',
+                name=f'{entity_name} {conc} {conc_unit}',
                 marker=dict(size=8, color=color),
                 error_y=dict(type='data', array=subset['SD'], visible=True) if 'SD' in subset.columns else None
             ))
@@ -65,7 +67,7 @@ class Visualizer:
                 ))
         
         fig.update_layout(
-            title='원본 형광 데이터 with 지수 피팅 및 점근선',
+            title='Raw data: 시간-형광 그래프',
             xaxis_title=time_label,
             yaxis_title='형광 강도 (RFU)',
             template='plotly_white',
@@ -82,6 +84,8 @@ class Visualizer:
         
         colors = px.colors.qualitative.Set1
         conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        base = conc_col.split('_')[0].lower()
+        entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
         concentrations = sorted(df[conc_col].unique())
         
         for idx, conc in enumerate(concentrations):
@@ -93,7 +97,7 @@ class Visualizer:
                 x=subset['time_s'],
                 y=subset['alpha'],
                 mode='markers',
-                name=f'{conc} {conc_unit}',
+                name=f'{entity_name} {conc} {conc_unit}',
                 marker=dict(size=8, color=color),
                 legendgroup=f'group{idx}'
             ))
@@ -124,6 +128,8 @@ class Visualizer:
         
         # Plot experimental data
         conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        base = conc_col.split('_')[0].lower()
+        entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
         for idx, conc in enumerate(sorted(df[conc_col].unique())):
             subset = df[df[conc_col] == conc]
             color = colors[idx % len(colors)]
@@ -132,7 +138,7 @@ class Visualizer:
                 x=subset['time_s'],
                 y=subset['alpha'],
                 mode='markers',
-                name=f'{conc} {conc_unit} (데이터)',
+                name=f'{entity_name} {conc} {conc_unit}',
                 marker=dict(size=6, color=color),
                 showlegend=(idx == 0)
             ), row=1, col=1)
@@ -143,8 +149,8 @@ class Visualizer:
             if result is None:
                 continue
             
-            for idx, conc in enumerate(sorted(df['enzyme_ugml'].unique())):
-                subset = df[df['enzyme_ugml'] == conc]
+            for idx, conc in enumerate(sorted(df[conc_col].unique())):
+                subset = df[df[conc_col] == conc]
                 indices = subset.index
                 
                 fig.add_trace(go.Scatter(
@@ -196,6 +202,8 @@ class Visualizer:
         concentrations = []
         
         conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        base = conc_col.split('_')[0].lower()
+        entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
         for conc in sorted(df[conc_col].unique()):
             subset = initial_data[initial_data[conc_col] == conc]
             if len(subset) >= 2:
@@ -233,7 +241,7 @@ class Visualizer:
         time_unit_abbr = "s⁻¹" if time_unit == 's' else "min⁻¹"
         fig.update_layout(
             title=f'초기 속도 분석 (0-{cutoff_time}{time_unit_label})',
-            xaxis_title=f'[효소] ({conc_unit})',
+            xaxis_title=f'[{"기질" if entity_name=="substrate" else "효소"}] ({conc_unit})',
             yaxis_title=f'v₀ ({time_unit_abbr})',
             template='plotly_white'
         )
@@ -256,6 +264,8 @@ class Visualizer:
         
         # Plot experimental data
         conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        base = conc_col.split('_')[0].lower()
+        entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
         for idx, conc in enumerate(sorted(df[conc_col].unique())):
             subset = df[df[conc_col] == conc]
             color = colors[idx % len(colors)]
@@ -264,7 +274,7 @@ class Visualizer:
                 x=subset['time_s'],
                 y=subset['alpha'],
                 mode='markers',
-                name=f'{conc} {conc_unit}',
+                name=f'{entity_name} {conc} {conc_unit}',
                 marker=dict(size=8, color=color),
                 legendgroup=f'conc_{idx}'
             ), row=1, col=1)

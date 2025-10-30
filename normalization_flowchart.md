@@ -1,7 +1,7 @@
 # 데이터 처리 파이프라인 순서도
 
 ```mermaid
-flowchart TD
+flowchart LR
     Start([Step 1: 원본 데이터 로드<br/>df_raw])
     Start --> LoadCSV{CSV 파일 업로드?}
     LoadCSV -->|Yes| Upload[업로드된 파일 읽기<br/>pd.read_csv]

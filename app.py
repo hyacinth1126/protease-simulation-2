@@ -47,8 +47,7 @@ def main():
         layout="wide"
     )
     
-    st.title("🔬 하이드로겔 FRET 고급 키네틱 분석")
-    st.markdown("### 세 가지 경쟁 모델: A (기질 고갈) | B (효소 비활성화) | C (물질전달 제한)")
+    st.title("🔬  Hydrogel FRET Simulation")
     st.markdown("---")
     
     # Sidebar configuration
@@ -62,24 +61,28 @@ def main():
         step=0.1,
         help="Kgp: 56.6 kDa"
     )
-    
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("""
-    **정규화 방법:**
-    - 각 농도별 지수 피팅: F(t) = F₀ + A·(1-e⁻ᵏᵗ)
-    - 점근선 Fmax = F₀ + A 사용
-    - α(t) = (F(t) - F₀)/(Fmax - F₀)
-    """)
-    
-    # Load data
+    # 구분선 후 데이터 소스 섹션
     st.sidebar.markdown("---")
     st.sidebar.subheader("📁 데이터 소스")
-    
+
     uploaded_file = st.sidebar.file_uploader(
         "CSV 파일 업로드",
         type=['csv'],
         help="컬럼: time_s, enzyme_ugml, FL_intensity, SD"
     )
+    # Provide sample raw data download in the data source section
+    try:
+        with open("fitc_peptide_timeseries.csv", "rb") as f:
+            sample_bytes = f.read()
+        st.sidebar.download_button(
+            label="샘플 원본 데이터 다운로드 (CSV)",
+            data=sample_bytes,
+            file_name="raw_data.csv",
+            mime="text/csv",
+            help="배포된 기본 CSV를 다운로드합니다."
+        )
+    except Exception:
+        pass
     
     # Step 1: Load raw data
     if uploaded_file is not None:
@@ -105,23 +108,14 @@ def main():
     normalizer = DataNormalizer()
     region_divider = RegionDivider()
     
-    # Configuration: number of iterations (minimum 2)
-    max_iterations = st.sidebar.number_input(
-        "정규화-구간 반복 횟수",
-        min_value=2,
-        max_value=10,
-        value=2,
-        step=1,
-        help="최종 정규화와 구간 구분을 반복할 횟수 (최소 2번)"
-    )
+    # Read iteration setting from session (set in 정규화 탭); default 2
+    max_iterations = int(st.session_state.get('max_iterations', 2))
     
     # Step 3-1: Initial temporary normalization (model-free threshold)
     df_current = normalizer.normalize_temporary(df_standardized)
     
     # Iterative loop: Divide regions → Final normalization → Divide regions → ...
     for iteration in range(max_iterations):
-        with st.sidebar:
-            st.info(f"🔄 반복 {iteration + 1}/{max_iterations}")
         
         # Step 4: Divide regions
         df_current = region_divider.divide_regions(df_current)
@@ -177,10 +171,30 @@ def main():
             use_container_width=True
         )
         
-        st.subheader("데이터 테이블")
+        st.subheader("Raw data table")
         st.dataframe(df, height=400, use_container_width=True)
     
     with tab2:
+        # Controls and method description for normalization
+        st.subheader("정규화 설정 및 방법")
+        st.caption("최종 정규화와 구간 구분을 반복하며 수렴시킵니다.")
+        st.number_input(
+            "정규화-구간 반복 횟수",
+            min_value=2,
+            max_value=10,
+            value=int(st.session_state.get('max_iterations', 2)),
+            step=1,
+            key="max_iterations",
+            help="최소 2회 이상 권장. 값을 변경하면 화면이 다시 계산됩니다."
+        )
+        with st.expander("정규화 방법 보기", expanded=False):
+            st.markdown("""
+            - 각 농도별 지수 피팅: F(t) = F₀ + A·(1−e⁻ᵏᵗ)
+            - 점근선 Fmax = F₀ + A 사용
+            - α(t) = (F(t) − F₀) / (Fmax − F₀)
+            """)
+        st.markdown(f"현재 반복 횟수: **{int(st.session_state.get('max_iterations', 2))}**")
+
         st.plotly_chart(
             Visualizer.plot_normalized_data(df, conc_unit, time_label), 
             use_container_width=True
@@ -190,8 +204,8 @@ def main():
         st.subheader("정규화 요약 (지수 피팅 기반)")
         
         summary_data = []
-        for conc in sorted(df['enzyme_ugml'].unique()):
-            subset = df[df['enzyme_ugml'] == conc]
+        for conc in sorted(df[conc_col].unique()):
+            subset = df[df[conc_col] == conc]
             # Check if optional columns exist
             fmax_std = f"{subset['Fmax_std'].iloc[0]:.1f}" if 'Fmax_std' in subset.columns else "N/A"
             fit_k = f"{subset['fit_k'].iloc[0]:.4f}" if 'fit_k' in subset.columns else "N/A"
