@@ -17,13 +17,32 @@ class Visualizer:
     """Visualization tools for model comparison"""
     
     @staticmethod
+    def _detect_conc_col(df: pd.DataFrame) -> str:
+        """Detect concentration column name robustly."""
+        if 'conc_col_name' in df.columns:
+            name = df['conc_col_name'].iloc[0]
+            if isinstance(name, str) and name in df.columns:
+                return name
+        # Fallback candidates
+        candidates = [c for c in df.columns
+                      if (c.endswith('uM') or c.endswith('nM') or '_uM' in c or '_nM' in c)
+                      and 'time' not in c.lower()
+                      and 'alpha' not in c.lower()
+                      and 'region' not in c.lower()
+                      and 'FL_' not in c and 'intensity' not in c.lower()]
+        if candidates:
+            return candidates[0]
+        # Last resort
+        return 'enzyme_ugml'
+    
+    @staticmethod
     def plot_raw_data(df: pd.DataFrame, conc_unit: str = 'μg/mL', time_label: str = '시간 (초)'):
         """Plot raw fluorescence data with exponential fits and asymptotes"""
         fig = go.Figure()
         
         colors = px.colors.qualitative.Set1
         
-        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        conc_col = Visualizer._detect_conc_col(df)
         base = conc_col.split('_')[0].lower()
         entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
         for idx, conc in enumerate(sorted(df[conc_col].unique())):
@@ -83,7 +102,7 @@ class Visualizer:
         fig = go.Figure()
         
         colors = px.colors.qualitative.Set1
-        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        conc_col = Visualizer._detect_conc_col(df)
         base = conc_col.split('_')[0].lower()
         entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
         concentrations = sorted(df[conc_col].unique())
@@ -127,7 +146,7 @@ class Visualizer:
         colors = px.colors.qualitative.Set1
         
         # Plot experimental data
-        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        conc_col = Visualizer._detect_conc_col(df)
         base = conc_col.split('_')[0].lower()
         entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
         for idx, conc in enumerate(sorted(df[conc_col].unique())):
@@ -201,7 +220,7 @@ class Visualizer:
         rates = []
         concentrations = []
         
-        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        conc_col = Visualizer._detect_conc_col(df)
         base = conc_col.split('_')[0].lower()
         entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
         for conc in sorted(df[conc_col].unique()):
@@ -263,7 +282,7 @@ class Visualizer:
         colors = px.colors.qualitative.Set1
         
         # Plot experimental data
-        conc_col = df['conc_col_name'].iloc[0] if 'conc_col_name' in df.columns else 'enzyme_ugml'
+        conc_col = Visualizer._detect_conc_col(df)
         base = conc_col.split('_')[0].lower()
         entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
         for idx, conc in enumerate(sorted(df[conc_col].unique())):
