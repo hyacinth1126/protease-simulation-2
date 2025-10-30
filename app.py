@@ -192,12 +192,16 @@ def main():
         summary_data = []
         for conc in sorted(df['enzyme_ugml'].unique()):
             subset = df[df['enzyme_ugml'] == conc]
+            # Check if optional columns exist
+            fmax_std = f"{subset['Fmax_std'].iloc[0]:.1f}" if 'Fmax_std' in subset.columns else "N/A"
+            fit_k = f"{subset['fit_k'].iloc[0]:.4f}" if 'fit_k' in subset.columns else "N/A"
+            
             summary_data.append({
                 f'농도 ({conc_unit})': conc,
                 'F0 (초기)': f"{subset['F0'].iloc[0]:.1f}",
                 'Fmax (점근선)': f"{subset['Fmax'].iloc[0]:.1f}",
-                'Fmax 표준편차': f"{subset['Fmax_std'].iloc[0]:.1f}",
-                '피팅 k (s⁻¹)': f"{subset['fit_k'].iloc[0]:.4f}",
+                'Fmax 표준편차': fmax_std,
+                '피팅 k (s⁻¹)': fit_k,
                 'α 범위': f"{subset['alpha'].min():.3f} - {subset['alpha'].max():.3f}",
                 'α 평균': f"{subset['alpha'].mean():.3f}"
             })
