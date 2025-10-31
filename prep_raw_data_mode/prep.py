@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-GraphPad Prism-style Michaelis-Menten Fitting and Calibration Curve Generator
-Raw data만 입력받아 MM fitting 후 calibration curve 생성
+Raw data만 입력받아 Michaelis-Menten Fitting 후 calibration curve 생성
 """
 
 import pandas as pd
@@ -20,7 +19,6 @@ def read_raw_data(filename='prep_data/raw/prep_raw.csv'):
     """
     prep_raw.csv에서 원본 데이터 읽기 및 정리
     
-    새로운 형식:
     - 첫 번째 행: 농도 값들 (각 농도가 mean, SD, N으로 3번 반복)
     - 두 번째 행: 컬럼 헤더 (time_min, mean, SD, N, mean, SD, N, ...)
     - 세 번째 행부터: 실제 데이터
@@ -109,7 +107,7 @@ def read_raw_data(filename='prep_data/raw/prep_raw.csv'):
 
 def exponential_association(t, F0, Fmax, k):
     """
-    Exponential Association 모델 (GraphPad Prism 표준)
+    Exponential Association 모델
     F(t) = F0 + (Fmax - F0) * [1 - exp(-k*t)]
     """
     return F0 + (Fmax - F0) * (1 - np.exp(-k * t))
@@ -122,7 +120,6 @@ def michaelis_menten_kinetic(t, Vmax, Km, F0):
     적분형: F(t) = F0 + Vmax * t * S / (Km + S)
     
     단순화: F(t) = F0 + (Vmax * t) / (1 + Km/t)
-    또는 더 정확히는 수치 적분 필요
     """
     # 근사: F(t) = F0 + Vmax * t / (1 + Km_eff / t)
     # Km_eff는 Km을 시간 단위로 변환
@@ -168,7 +165,7 @@ def fit_time_course(times, values, model='exponential'):
             )
             F0, Fmax, k = popt
             
-            # Vmax와 Km으로 변환 (GraphPad Prism 스타일)
+            # Vmax와 Km으로 변환
             # Vmax는 초기 속도, Km은 반속도 관련
             Vmax = k * (Fmax - F0)  # 초기 속도
             Km = (Fmax - F0) / 2  # 반속도 지점 근사
@@ -232,7 +229,7 @@ def michaelis_menten_calibration(x, Vmax_cal, Km_cal):
 
 def fit_calibration_curve(concentrations, responses):
     """
-    농도 vs 응답 데이터에 MM calibration curve 피팅
+    농도 vs 응답 데이터에 calibration curve 피팅
     
     Parameters:
     - concentrations: 농도 배열
@@ -299,7 +296,7 @@ def fit_calibration_curve(concentrations, responses):
 
 def main():
     """메인 함수"""
-    print("📊 GraphPad Prism-style MM Fitting & Calibration Curve Generator")
+    print("📊 Michaelis-Menten Calibration Curve Generator")
     print("=" * 70)
     
     # 1. Raw data 읽기
@@ -314,7 +311,7 @@ def main():
         return
     
     # 2. 각 농도별 시간 경과 곡선 피팅
-    print("\n2️⃣ 각 농도별 시간 경과 곡선 피팅 (MM/Exponential)...")
+    print("\n2️⃣ 각 농도별 시간 경과 곡선 피팅 ...")
     
     mm_results = {}
     all_fit_data = []
@@ -355,8 +352,8 @@ def main():
         
         print(f"   ✅ {conc_name}: Vmax={Vmax:.2f}, Km={Km:.4f}, R²={r_sq:.4f}")
     
-    # 3. MM Results CSV 저장
-    print("\n3️⃣ MM Results CSV 생성 중...")
+    # 3. Michaelis-Menten Results CSV 저장
+    print("\n3️⃣ Michaelis-Menten Results CSV 생성 중...")
     
     results_data = []
     for conc_name, params in sorted(mm_results.items(), key=lambda x: x[1]['concentration']):
@@ -373,7 +370,6 @@ def main():
     results_df = pd.DataFrame(results_data)
     results_filename = 'prep_data/fitting_results/MM_results_generated.csv'
     
-    # GraphPad Prism 스타일로 저장
     with open(results_filename, 'w', newline='', encoding='utf-8-sig') as f:
         f.write(',')
         f.write(','.join(results_df['Concentration'].astype(str)) + '\n')
@@ -490,7 +486,7 @@ def main():
     # 최종 요약
     print("\n" + "=" * 70)
     print("📋 생성된 파일:")
-    print(f"   1. {results_filename} - GraphPad Prism 스타일 MM 결과")
+    print(f"   1. {results_filename} - Michaelis-Menten Fitting 결과")
     print(f"   2. prep_data/fitting_results/MM_results_detailed.csv - 상세 MM 파라미터")
     print(f"   3. {cal_curve_filename} - Calibration curve XY 데이터 (그래프용)")
     print(f"   4. prep_data/fitting_results/MM_calibration_curve.png - Calibration curve 그래프 (PNG)")

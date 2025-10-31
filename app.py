@@ -11,7 +11,7 @@ import seaborn as sns
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from analysis import (
+from general_analysis_mode.analysis import (
     UnitStandardizer,
     DataNormalizer,
     RegionDivider,
@@ -22,17 +22,17 @@ from analysis import (
     ModelE_ProductInhibition,
     ModelF_EnzymeSurfaceSequestration
 )
-from plot import Visualizer
+from general_analysis_mode.plot import Visualizer
 
 # Prep Raw Data 모드용 import
-from prep import (
+from prep_raw_data_mode.prep import (
     read_raw_data,
     fit_time_course,
     fit_calibration_curve,
     michaelis_menten_calibration,
     plot_calibration_curve
 )
-from interpolate_prism import (
+from data_interpolation_mode.interpolate_prism import (
     exponential_association,
     create_prism_interpolation_range
 )
@@ -100,6 +100,24 @@ def main():
         step=0.1,
         help="Kgp: 56.6 kDa"
     )
+    
+    enzyme_name = st.sidebar.text_input(
+        "효소 이름 (선택사항)",
+        value="",
+        placeholder="enzyme",
+        help="그래프 범례에 표시될 효소 이름 (비워두면 'enzyme' 표시)"
+    )
+    if enzyme_name.strip() == "":
+        enzyme_name = "enzyme"
+    
+    substrate_name = st.sidebar.text_input(
+        "기질 이름 (선택사항)",
+        value="",
+        placeholder="substrate",
+        help="그래프 범례에 표시될 기질 이름 (비워두면 'substrate' 표시)"
+    )
+    if substrate_name.strip() == "":
+        substrate_name = "substrate"
     # 구분선 후 데이터 소스 섹션
     st.sidebar.markdown("---")
     st.sidebar.subheader("📁 데이터 소스")
@@ -135,7 +153,7 @@ def main():
         col1, col2 = st.sidebar.columns(2)
         with col1:
             try:
-                with open("prep_data/fitting_results/MM_calculated_curves.csv", "rb") as f:
+                with open("prep_raw_data_mode/results/MM_calculated_curves.csv", "rb") as f:
                     sample_bytes = f.read()
                 st.download_button(
                     label="📥 Calculated",
@@ -147,7 +165,7 @@ def main():
                 pass
         with col2:
             try:
-                with open("prep_data/interpolation_results/MM_interpolated_curves.csv", "rb") as f:
+                with open("data_interpolation_mode/results/MM_interpolated_curves.csv", "rb") as f:
                     sample_bytes = f.read()
                 st.download_button(
                     label="📥 Interpolated",
@@ -178,12 +196,12 @@ def main():
         else:
             # Try to load from fitting_results first, then interpolation_results
             try:
-                df_fitted = pd.read_csv("prep_data/fitting_results/MM_calculated_curves.csv")
-                st.sidebar.info("prep_data/fitting_results/MM_calculated_curves.csv 사용 중")
+                df_fitted = pd.read_csv("prep_raw_data_mode/results/MM_calculated_curves.csv")
+                st.sidebar.info("prep_raw_data_mode/results/MM_calculated_curves.csv 사용 중")
             except FileNotFoundError:
                 try:
-                    df_fitted = pd.read_csv("prep_data/interpolation_results/MM_interpolated_curves.csv")
-                    st.sidebar.info("prep_data/interpolation_results/MM_interpolated_curves.csv 사용 중")
+                    df_fitted = pd.read_csv("data_interpolation_mode/results/MM_interpolated_curves.csv")
+                    st.sidebar.info("data_interpolation_mode/results/MM_interpolated_curves.csv 사용 중")
                 except FileNotFoundError:
                     st.error("Fitted curves 파일을 찾을 수 없습니다. 먼저 'Prep Raw Data 모드' 또는 'Data Interpolation 모드'를 실행하거나 파일을 업로드해주세요.")
                     st.stop()
@@ -302,7 +320,10 @@ def main():
     
     with tab1:
         st.plotly_chart(
-            Visualizer.plot_raw_data(df, conc_unit, time_label, use_lines=(st.session_state.get('data_source_type') == 'Fitted Curves (from Prep mode)')), 
+            Visualizer.plot_raw_data(df, conc_unit, time_label, 
+                                    use_lines=(st.session_state.get('data_source_type') == 'Fitted Curves (from Prep mode)'),
+                                    enzyme_name=enzyme_name, 
+                                    substrate_name=substrate_name), 
             use_container_width=True
         )
         
@@ -331,7 +352,10 @@ def main():
         st.markdown(f"현재 반복 횟수: **{int(st.session_state.get('max_iterations', 2))}**")
 
         st.plotly_chart(
-            Visualizer.plot_normalized_data(df, conc_unit, time_label, use_lines=(st.session_state.get('data_source_type') == 'Fitted Curves (from Prep mode)')), 
+            Visualizer.plot_normalized_data(df, conc_unit, time_label, 
+                                           use_lines=(st.session_state.get('data_source_type') == 'Fitted Curves (from Prep mode)'),
+                                           enzyme_name=enzyme_name,
+                                           substrate_name=substrate_name), 
             use_container_width=True
         )
         
@@ -535,7 +559,9 @@ def main():
             # Plot all model fits
             st.subheader("📈 전체 모델 피팅 결과")
             st.plotly_chart(
-                Visualizer.plot_model_fits(df, results, conc_unit, time_label), 
+                Visualizer.plot_model_fits(df, results, conc_unit, time_label,
+                                          enzyme_name=enzyme_name,
+                                          substrate_name=substrate_name), 
                 use_container_width=True
             )
             
@@ -709,14 +735,14 @@ def main():
 
 
 def prep_raw_data_mode(st):
-    """Prep Raw Data 모드 - GraphPad Prism 스타일 MM Fitting"""
+    """Prep Raw Data 모드 - Michaelis-Menten Fitting"""
     
     # 폴더 구조 생성
     os.makedirs("prep_data/raw", exist_ok=True)
-    os.makedirs("prep_data/fitting_results", exist_ok=True)
+    os.makedirs("prep_raw_data_mode/results", exist_ok=True)
     
     st.header("📊 Prep Raw Data 모드")
-    st.markdown("GraphPad Prism 스타일 Michaelis-Menten Fitting 및 Calculated Curve 생성")
+    st.markdown("Michaelis-Menten Fitting 및 Calculated Curve 생성")
     st.markdown("---")
     
     # 사이드바 설정
@@ -984,18 +1010,18 @@ def prep_raw_data_mode(st):
             # 결과 파일을 fitting_results 폴더에 자동 저장
             try:
                 # Calculated curves 저장
-                calc_df.to_csv('prep_data/fitting_results/MM_calculated_curves.csv', index=False)
+                calc_df.to_csv('prep_raw_data_mode/results/MM_calculated_curves.csv', index=False)
                 
                 # MM results 저장
-                results_df.to_csv('prep_data/fitting_results/MM_results_detailed.csv', index=False)
+                results_df.to_csv('prep_raw_data_mode/results/MM_results_detailed.csv', index=False)
                 
                 # Fit curves 저장
-                fit_curves_df.to_csv('prep_data/fitting_results/MM_fit_curves.csv', index=False)
+                fit_curves_df.to_csv('prep_raw_data_mode/results/MM_fit_curves.csv', index=False)
                 
                 # Calibration curve 저장
-                cal_curve_df.to_csv('prep_data/fitting_results/MM_calibration_curve.csv', index=False)
+                cal_curve_df.to_csv('prep_raw_data_mode/results/MM_calibration_curve.csv', index=False)
                 
-                st.sidebar.success("✅ 결과 파일이 prep_data/fitting_results/ 에 저장되었습니다!")
+                st.sidebar.success("✅ 결과 파일이 prep_raw_data_mode/results/ 에 저장되었습니다!")
             except Exception as e:
                 st.sidebar.warning(f"⚠️ 파일 저장 중 오류: {e}")
             
@@ -1187,10 +1213,10 @@ def data_interpolation_mode(st):
     
     # 폴더 구조 생성
     os.makedirs("prep_data/raw", exist_ok=True)
-    os.makedirs("prep_data/interpolation_results", exist_ok=True)
+    os.makedirs("data_interpolation_mode/results", exist_ok=True)
     
     st.header("📈 Data Interpolation 모드")
-    st.markdown("GraphPad Prism 스타일 보간 - Fitting 결과에서 고밀도 곡선 생성")
+    st.markdown("GraphPad스타일 보간 - Fitting 결과에서 고밀도 곡선 생성")
     st.markdown("---")
     
     # 사이드바 설정
@@ -1219,7 +1245,7 @@ def data_interpolation_mode(st):
     col1, col2 = st.sidebar.columns(2)
     with col1:
         try:
-            with open("prep_data/fitting_results/MM_results_detailed.csv", "rb") as f:
+            with open("prep_raw_data_mode/results/MM_results_detailed.csv", "rb") as f:
                 sample_bytes = f.read()
             st.download_button(
                 label="📥 샘플 MM Results",
@@ -1284,8 +1310,8 @@ def data_interpolation_mode(st):
     else:
         # 기본 샘플 데이터 사용
         try:
-            mm_results_df = pd.read_csv('prep_data/fitting_results/MM_results_detailed.csv')
-            st.sidebar.info("prep_data/fitting_results/MM_results_detailed.csv 사용 중")
+            mm_results_df = pd.read_csv('prep_raw_data_mode/results/MM_results_detailed.csv')
+            st.sidebar.info("prep_raw_data_mode/results/MM_results_detailed.csv 사용 중")
         except FileNotFoundError:
             st.error("MM Results 파일을 찾을 수 없습니다. CSV 파일을 업로드해주세요.")
             st.info("💡 먼저 'Prep Raw Data 모드'에서 분석을 실행하여 MM_results_detailed.csv를 생성하거나, 파일을 업로드해주세요.")
@@ -1433,13 +1459,13 @@ def data_interpolation_mode(st):
             # 결과 파일을 interpolation_results 폴더에 자동 저장
             try:
                 # Interpolated curves 저장
-                interp_df.to_csv('prep_data/interpolation_results/MM_interpolated_curves.csv', index=False)
+                interp_df.to_csv('data_interpolation_mode/results/MM_interpolated_curves.csv', index=False)
                 
                 # Y to X results 저장 (있을 경우)
                 if y_to_x_df is not None:
-                    y_to_x_df.to_csv('prep_data/interpolation_results/MM_Y_to_X_interpolation.csv', index=False)
+                    y_to_x_df.to_csv('data_interpolation_mode/results/MM_Y_to_X_interpolation.csv', index=False)
                 
-                st.sidebar.success("✅ 결과 파일이 prep_data/interpolation_results/ 에 저장되었습니다!")
+                st.sidebar.success("✅ 결과 파일이 data_interpolation_mode/results/ 에 저장되었습니다!")
             except Exception as e:
                 st.sidebar.warning(f"⚠️ 파일 저장 중 오류: {e}")
             

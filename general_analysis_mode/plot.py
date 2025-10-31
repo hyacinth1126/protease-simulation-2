@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 from typing import List
-from analysis import ModelResults
+from .analysis import ModelResults
 
 
 class Visualizer:
@@ -36,7 +36,8 @@ class Visualizer:
         return 'enzyme_ugml'
     
     @staticmethod
-    def plot_raw_data(df: pd.DataFrame, conc_unit: str = 'μg/mL', time_label: str = '시간 (초)', use_lines: bool = False):
+    def plot_raw_data(df: pd.DataFrame, conc_unit: str = 'μg/mL', time_label: str = '시간 (초)', use_lines: bool = False, 
+                     enzyme_name: str = 'enzyme', substrate_name: str = 'substrate'):
         """Plot raw fluorescence data with exponential fits and asymptotes
         
         Args:
@@ -44,6 +45,8 @@ class Visualizer:
             conc_unit: Concentration unit for labels
             time_label: Time axis label
             use_lines: If True, use lines instead of markers (for fitted curves)
+            enzyme_name: Custom name for enzyme (default: 'enzyme')
+            substrate_name: Custom name for substrate (default: 'substrate')
         """
         fig = go.Figure()
         
@@ -51,7 +54,7 @@ class Visualizer:
         
         conc_col = Visualizer._detect_conc_col(df)
         base = conc_col.split('_')[0].lower()
-        entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
+        entity_name = substrate_name if base.startswith('pep') or base.startswith('sub') else enzyme_name
         for idx, conc in enumerate(sorted(df[conc_col].unique())):
             subset = df[df[conc_col] == conc]
             color = colors[idx % len(colors)]
@@ -109,7 +112,8 @@ class Visualizer:
         return fig
     
     @staticmethod
-    def plot_normalized_data(df: pd.DataFrame, conc_unit: str = 'μg/mL', time_label: str = '시간 (초)', use_lines: bool = False):
+    def plot_normalized_data(df: pd.DataFrame, conc_unit: str = 'μg/mL', time_label: str = '시간 (초)', use_lines: bool = False,
+                            enzyme_name: str = 'enzyme', substrate_name: str = 'substrate'):
         """Plot normalized data (fraction cleaved)
         
         Args:
@@ -117,13 +121,15 @@ class Visualizer:
             conc_unit: Concentration unit for labels
             time_label: Time axis label
             use_lines: If True, use lines instead of markers (for fitted curves)
+            enzyme_name: Custom name for enzyme (default: 'enzyme')
+            substrate_name: Custom name for substrate (default: 'substrate')
         """
         fig = go.Figure()
         
         colors = px.colors.qualitative.Set1
         conc_col = Visualizer._detect_conc_col(df)
         base = conc_col.split('_')[0].lower()
-        entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
+        entity_name = substrate_name if base.startswith('pep') or base.startswith('sub') else enzyme_name
         concentrations = sorted(df[conc_col].unique())
         
         for idx, conc in enumerate(concentrations):
@@ -158,8 +164,18 @@ class Visualizer:
     
     @staticmethod
     def plot_model_fits(df: pd.DataFrame, results: List[ModelResults], 
-                       conc_unit: str = 'μg/mL', time_label: str = '시간 (초)'):
-        """Plot all model fits together"""
+                       conc_unit: str = 'μg/mL', time_label: str = '시간 (초)',
+                       enzyme_name: str = 'enzyme', substrate_name: str = 'substrate'):
+        """Plot all model fits together
+        
+        Args:
+            df: DataFrame with time_s, alpha columns
+            results: List of ModelResults objects
+            conc_unit: Concentration unit for labels
+            time_label: Time axis label
+            enzyme_name: Custom name for enzyme (default: 'enzyme')
+            substrate_name: Custom name for substrate (default: 'substrate')
+        """
         fig = make_subplots(
             rows=2, cols=1,
             subplot_titles=('모델 피팅', '잔차'),
@@ -172,7 +188,7 @@ class Visualizer:
         # Plot experimental data
         conc_col = Visualizer._detect_conc_col(df)
         base = conc_col.split('_')[0].lower()
-        entity_name = 'substrate' if base.startswith('pep') or base.startswith('sub') else 'enzyme'
+        entity_name = substrate_name if base.startswith('pep') or base.startswith('sub') else enzyme_name
         for idx, conc in enumerate(sorted(df[conc_col].unique())):
             subset = df[df[conc_col] == conc]
             color = colors[idx % len(colors)]

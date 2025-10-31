@@ -106,26 +106,34 @@ class UnitStandardizer:
         elif 'enzyme_ugml' in df_std.columns or 'enzyme_ug/mL' in df_std.columns:
             conc_col = 'enzyme_ugml' if 'enzyme_ugml' in df_std.columns else 'enzyme_ug/mL'
             conc_unit_type = 'mass'
-            target_col = 'enzyme_uM'
+            target_col = 'enzyme_nM'  # Changed from uM to nM for μg/mL range
         elif 'peptide_ugml' in df_std.columns or 'peptide_ug/mL' in df_std.columns:
             conc_col = 'peptide_ugml' if 'peptide_ugml' in df_std.columns else 'peptide_ug/mL'
             conc_unit_type = 'mass'
-            target_col = 'peptide_uM'
+            target_col = 'peptide_nM'  # Changed from uM to nM for μg/mL range
         elif 'enzyme_ngml' in df_std.columns or 'enzyme_ng/mL' in df_std.columns:
             conc_col = 'enzyme_ngml' if 'enzyme_ngml' in df_std.columns else 'enzyme_ng/mL'
             conc_unit_type = 'mass'
-            target_col = 'enzyme_nM'
+            target_col = 'enzyme_pM'  # Changed from nM to pM for ng/mL range
         
         # Convert mass to molar if needed
         if conc_col and conc_unit_type == 'mass':
-            MW_g_per_mol = self.enzyme_mw * 1000  # kDa → g/mol
+            MW_kDa = self.enzyme_mw  # kDa
             
             if 'uM' in target_col:
-                # Convert to μM
-                df_std[target_col] = (df_std[conc_col] / MW_g_per_mol) * 1e6
+                # Convert μg/mL to μM
+                # Formula: μM = (μg/mL) / (MW in kDa) / 1000
+                df_std[target_col] = df_std[conc_col] / MW_kDa / 1000
             elif 'nM' in target_col:
-                # Convert to nM
-                df_std[target_col] = (df_std[conc_col] / MW_g_per_mol) * 1e9
+                # Convert μg/mL to nM
+                # Formula: nM = (μg/mL) / (MW in kDa)
+                # Example: 0.3125 μg/mL / 56.6 kDa = 5.52 nM
+                df_std[target_col] = df_std[conc_col] / MW_kDa
+            elif 'pM' in target_col:
+                # Convert ng/mL to pM
+                # Formula: pM = (ng/mL) / (MW in kDa)
+                # Example: 3.125 ng/mL / 56.6 kDa = 55.2 pM
+                df_std[target_col] = df_std[conc_col] / MW_kDa
             
             # Store original column name for reference
             df_std['_original_conc_col'] = conc_col

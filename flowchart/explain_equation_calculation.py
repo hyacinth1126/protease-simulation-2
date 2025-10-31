@@ -14,7 +14,7 @@ matplotlib.use('Agg')
 
 def exponential_association(t, F0, Fmax, k):
     """
-    Exponential Association 모델 (GraphPad Prism 표준)
+    Exponential Association 모델
     F(t) = F0 + (Fmax - F0) * [1 - exp(-k*t)]
     """
     return F0 + (Fmax - F0) * (1 - np.exp(-k * t))

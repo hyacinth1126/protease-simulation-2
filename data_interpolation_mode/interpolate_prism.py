@@ -197,7 +197,7 @@ def prism_interpolate_y_to_x(y_interp, F0, Fmax, k, x_range_min, x_range_max,
 
 def main():
     """메인 함수"""
-    print("📊 Interpolation Generator")
+    print("📊 GraphPad Interpolation Generator")
     print("=" * 70)
     
     # 1. Fit 파라미터 읽기
