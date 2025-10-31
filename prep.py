@@ -16,7 +16,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
-def read_raw_data(filename='prep_data/prep_raw.csv'):
+def read_raw_data(filename='prep_data/raw/prep_raw.csv'):
     """
     prep_raw.csv에서 원본 데이터 읽기 및 정리
     
@@ -305,7 +305,7 @@ def main():
     # 1. Raw data 읽기
     print("\n1️⃣ Raw data 파일 읽는 중...")
     try:
-        raw_data = read_raw_data('prep_data/prep_raw.csv')
+        raw_data = read_raw_data('prep_data/raw/prep_raw.csv')
         print(f"   ✅ {len(raw_data)}개 농도 조건 발견")
         for conc_name, data in raw_data.items():
             print(f"      - {conc_name}: {len(data['time'])}개 데이터 포인트")
@@ -346,7 +346,7 @@ def main():
         for t, val, fit_val in zip(times, values, fit_values):
             all_fit_data.append({
                 'Concentration': conc_name,
-                'Conc_Value': data['concentration'],
+                'Concentration [ug/mL]': data['concentration'],
                 'Time_min': t,
                 'Observed_Value': val,
                 'Fit_Value': fit_val,
@@ -361,8 +361,7 @@ def main():
     results_data = []
     for conc_name, params in sorted(mm_results.items(), key=lambda x: x[1]['concentration']):
         results_data.append({
-            'Concentration': conc_name,
-            'Conc_Value': params['concentration'],
+            'Concentration [ug/mL]': params['concentration'],
             'Vmax': params['Vmax'],
             'Km': params['Km'],
             'F0': params['F0'],
@@ -372,7 +371,7 @@ def main():
         })
     
     results_df = pd.DataFrame(results_data)
-    results_filename = 'prep_data/MM_results_generated.csv'
+    results_filename = 'prep_data/fitting_results/MM_results_generated.csv'
     
     # GraphPad Prism 스타일로 저장
     with open(results_filename, 'w', newline='', encoding='utf-8-sig') as f:
@@ -383,9 +382,9 @@ def main():
         f.write(f"Vmax,{','.join(results_df['Vmax'].astype(str).str[:10])}\n")
         f.write(f"Km,{','.join(results_df['Km'].astype(str))}\n")
     
-    results_df.to_csv('prep_data/MM_results_detailed.csv', index=False)
+    results_df.to_csv('prep_data/fitting_results/MM_results_detailed.csv', index=False)
     print(f"   ✅ {results_filename} 저장 완료")
-    print(f"   ✅ prep_data/MM_results_detailed.csv 저장 완료 (상세 데이터)")
+    print(f"   ✅ prep_data/fitting_results/MM_results_detailed.csv 저장 완료 (상세 데이터)")
     
     # 4. Calibration Curve 생성
     print("\n4️⃣ Calibration Curve 생성 중...")
@@ -421,19 +420,19 @@ def main():
     cal_curve_data = []
     for x, y in zip(conc_range, cal_y_values):
         cal_curve_data.append({
-            'Concentration': x,
+            'Concentration_ug/mL': x,
             'Vmax_Fitted': y,
             'Equation': cal_equation
         })
     
     cal_curve_df = pd.DataFrame(cal_curve_data)
-    cal_curve_filename = 'prep_data/MM_calibration_curve.csv'
+    cal_curve_filename = 'prep_data/fitting_results/MM_calibration_curve.csv'
     cal_curve_df.to_csv(cal_curve_filename, index=False)
     print(f"   ✅ {cal_curve_filename} 저장 완료 ({len(cal_curve_df)} 행)")
     
     # 6. Fit curves 데이터 저장
     fit_curves_df = pd.DataFrame(all_fit_data)
-    fit_curves_filename = 'prep_data/MM_fit_curves.csv'
+    fit_curves_filename = 'prep_data/fitting_results/MM_fit_curves.csv'
     fit_curves_df.to_csv(fit_curves_filename, index=False)
     print(f"   ✅ {fit_curves_filename} 저장 완료 ({len(fit_curves_df)} 행)")
     
@@ -452,7 +451,7 @@ def main():
     for conc_name, params in sorted(mm_results.items(), key=lambda x: x[1]['concentration']):
         eq = f"F(t) = {params['F0']:.2f} + ({params['Fmax'] - params['F0']:.2f}) * [1 - exp(-{params['k']:.4f}*t)]"
         equations_data.append({
-            'Type': f'Time Course ({conc_name})',
+            'Type': f'{conc_name}',
             'Equation': eq,
             'Vmax': params['Vmax'],
             'Km': params['Km'],
@@ -460,7 +459,7 @@ def main():
         })
     
     equations_df = pd.DataFrame(equations_data)
-    equations_filename = 'prep_data/MM_equations.csv'
+    equations_filename = 'prep_data/fitting_results/MM_equations.csv'
     equations_df.to_csv(equations_filename, index=False)
     print(f"   ✅ {equations_filename} 저장 완료")
     
@@ -484,7 +483,7 @@ def main():
         })
     
     calibration_equations_df = pd.DataFrame(calibration_equations_data)
-    calibration_equations_filename = 'prep_data/MM_calibration_equations.csv'
+    calibration_equations_filename = 'prep_data/fitting_results/MM_calibration_equations.csv'
     calibration_equations_df.to_csv(calibration_equations_filename, index=False)
     print(f"   ✅ {calibration_equations_filename} 저장 완료 (농도별 상세 방정식)")
     
@@ -492,9 +491,9 @@ def main():
     print("\n" + "=" * 70)
     print("📋 생성된 파일:")
     print(f"   1. {results_filename} - GraphPad Prism 스타일 MM 결과")
-    print(f"   2. prep_data/MM_results_detailed.csv - 상세 MM 파라미터")
+    print(f"   2. prep_data/fitting_results/MM_results_detailed.csv - 상세 MM 파라미터")
     print(f"   3. {cal_curve_filename} - Calibration curve XY 데이터 (그래프용)")
-    print(f"   4. prep_data/MM_calibration_curve.png - Calibration curve 그래프 (PNG)")
+    print(f"   4. prep_data/fitting_results/MM_calibration_curve.png - Calibration curve 그래프 (PNG)")
     print(f"   5. {fit_curves_filename} - 각 농도별 시간 곡선 fit 데이터")
     print(f"   6. {equations_filename} - 모든 방정식 요약")
     print("\n📊 Calibration Curve:")
@@ -505,7 +504,7 @@ def main():
     plot_calibration_curve(
         cal_curve_df, results_df, cal_params, cal_equation
     )
-    print("   ✅ prep_data/MM_calibration_curve.png 저장 완료")
+    print("   ✅ prep_data/fitting_results/MM_calibration_curve.png 저장 완료")
     
     print("\n✨ 완료!")
 
@@ -518,7 +517,7 @@ def plot_calibration_curve(cal_curve_df, results_df, cal_params, cal_equation):
     
     # Calibration curve 그리기
     ax.plot(
-        cal_curve_df['Concentration'],
+        cal_curve_df['Concentration_ug/mL'],
         cal_curve_df['Vmax_Fitted'],
         'b-', linewidth=2.5,
         label=f'MM Fit: {cal_equation}',
@@ -526,7 +525,7 @@ def plot_calibration_curve(cal_curve_df, results_df, cal_params, cal_equation):
     )
     
     # 실험 데이터 포인트 그리기
-    concentrations = results_df['Conc_Value'].values
+    concentrations = results_df['Concentration [ug/mL]'].values
     vmax_values = results_df['Vmax'].values
     
     ax.scatter(
@@ -565,7 +564,7 @@ def plot_calibration_curve(cal_curve_df, results_df, cal_params, cal_equation):
     plt.tight_layout()
     
     # PNG 저장
-    plt.savefig('prep_data/MM_calibration_curve.png', dpi=300, bbox_inches='tight')
+    plt.savefig('prep_data/fitting_results/MM_calibration_curve.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 

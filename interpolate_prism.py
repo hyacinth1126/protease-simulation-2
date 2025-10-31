@@ -258,7 +258,7 @@ def main():
         for x, y in zip(x_interp, y_interp):
             all_interp_data.append({
                 'Concentration': conc_name,
-                'Conc_Value': row['Conc_Value'],
+                'Concentration [ug/mL]': row['Concentration [ug/mL]'],
                 'Time_min': x,
                 'RFU_Interpolated': y,
                 'Is_Extrapolated': (x < x_data_min) or (x > x_data_max)
@@ -372,7 +372,7 @@ def plot_interpolated_curves(interp_df, raw_df, mm_results):
     
     # 농도별 색상 매핑 (농도 순서대로)
     conc_color_map = {
-        '0.3125ug/ml': 'black',
+        '0.3125ug/ml': 'blue',
         '0.625 ug/mL': 'red',
         '1.25 ug/mL': 'orange',
         '2.5 ug/mL': 'green',
@@ -449,7 +449,7 @@ def plot_interpolated_curves(interp_df, raw_df, mm_results):
     # 그래프 스타일
     ax.set_xlabel('Time (min)', fontsize=14, fontweight='bold')
     ax.set_ylabel('RFU', fontsize=14, fontweight='bold')
-    ax.set_title('RFU vs Time (min) - Prism Interpolation', 
+    ax.set_title('Time-Fluorescence Curve', 
                  fontsize=16, fontweight='bold', pad=20)
     
     # 그리드

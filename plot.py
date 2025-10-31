@@ -36,8 +36,15 @@ class Visualizer:
         return 'enzyme_ugml'
     
     @staticmethod
-    def plot_raw_data(df: pd.DataFrame, conc_unit: str = 'μg/mL', time_label: str = '시간 (초)'):
-        """Plot raw fluorescence data with exponential fits and asymptotes"""
+    def plot_raw_data(df: pd.DataFrame, conc_unit: str = 'μg/mL', time_label: str = '시간 (초)', use_lines: bool = False):
+        """Plot raw fluorescence data with exponential fits and asymptotes
+        
+        Args:
+            df: DataFrame with time_s, FL_intensity columns
+            conc_unit: Concentration unit for labels
+            time_label: Time axis label
+            use_lines: If True, use lines instead of markers (for fitted curves)
+        """
         fig = go.Figure()
         
         colors = px.colors.qualitative.Set1
@@ -49,14 +56,19 @@ class Visualizer:
             subset = df[df[conc_col] == conc]
             color = colors[idx % len(colors)]
             
-            # Plot experimental data
+            # Plot experimental data (markers or lines)
+            plot_mode = 'lines' if use_lines else 'markers'
+            marker_dict = dict(size=8, color=color) if not use_lines else None
+            line_dict = dict(color=color, width=2.5) if use_lines else None
+            
             fig.add_trace(go.Scatter(
                 x=subset['time_s'],
                 y=subset['FL_intensity'],
-                mode='markers',
+                mode=plot_mode,
                 name=f'{entity_name} {conc} {conc_unit}',
-                marker=dict(size=8, color=color),
-                error_y=dict(type='data', array=subset['SD'], visible=True) if 'SD' in subset.columns else None
+                marker=marker_dict if marker_dict else None,
+                line=line_dict if line_dict else None,
+                error_y=dict(type='data', array=subset['SD'], visible=True) if ('SD' in subset.columns and not use_lines) else None
             ))
             
             # Plot exponential fit (if available)
@@ -97,8 +109,15 @@ class Visualizer:
         return fig
     
     @staticmethod
-    def plot_normalized_data(df: pd.DataFrame, conc_unit: str = 'μg/mL', time_label: str = '시간 (초)'):
-        """Plot normalized data (fraction cleaved)"""
+    def plot_normalized_data(df: pd.DataFrame, conc_unit: str = 'μg/mL', time_label: str = '시간 (초)', use_lines: bool = False):
+        """Plot normalized data (fraction cleaved)
+        
+        Args:
+            df: DataFrame with time_s, alpha columns
+            conc_unit: Concentration unit for labels
+            time_label: Time axis label
+            use_lines: If True, use lines instead of markers (for fitted curves)
+        """
         fig = go.Figure()
         
         colors = px.colors.qualitative.Set1
@@ -111,13 +130,18 @@ class Visualizer:
             subset = df[df[conc_col] == conc]
             color = colors[idx % len(colors)]
             
-            # Plot data points
+            # Plot data points (markers or lines)
+            plot_mode = 'lines' if use_lines else 'markers'
+            marker_dict = dict(size=8, color=color) if not use_lines else None
+            line_dict = dict(color=color, width=2.5) if use_lines else None
+            
             fig.add_trace(go.Scatter(
                 x=subset['time_s'],
                 y=subset['alpha'],
-                mode='markers',
+                mode=plot_mode,
                 name=f'{entity_name} {conc} {conc_unit}',
-                marker=dict(size=8, color=color),
+                marker=marker_dict if marker_dict else None,
+                line=line_dict if line_dict else None,
                 legendgroup=f'group{idx}'
             ))
         
