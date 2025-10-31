@@ -1,0 +1,19 @@
+﻿,0.3125ug/ml,0.625 ug/mL,1.25 ug/mL,2.5 ug/mL,5 ug/mL
+Michaelis-Menten,,,,,
+Best-fit values,,,,,
+Vmax,9210,11015,13720,14820,16015
+Km,0.255,0.1125,0.08734,0.1568,0.123
+95% CI (profile likelihood),,,,,
+Vmax,9178 to 9243,10987 to 11043,13695 to 13745,14779 to 14861,15968 to 16062
+Km,0.2417 to 0.2686,0.1047 to 0.1204,0.08201 to 0.09273,0.1478 to 0.1659,0.1140 to 0.1322
+Goodness of Fit,,,,,
+Degrees of Freedom,398,398,398,398,398
+R squared,0.9932,0.9963,0.9981,0.9957,0.9951
+Sum of Squares,23882289,19007939,15013276,39883378,52783739
+Sy.x,245,218.5,194.2,316.6,364.2
+Constraints,,,,,
+Km,Km > 0,Km > 0,Km > 0,Km > 0,Km > 0
+,,,,,
+Number of points,,,,,
+# of X values,400,400,400,400,400
+# Y values analyzed,400,400,400,400,400

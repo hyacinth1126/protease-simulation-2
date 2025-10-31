@@ -8,6 +8,8 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 import seaborn as sns
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from analysis import (
     UnitStandardizer,
@@ -21,6 +23,19 @@ from analysis import (
     ModelF_EnzymeSurfaceSequestration
 )
 from plot import Visualizer
+
+# Prep Raw Data 모드용 import
+from prep import (
+    read_raw_data,
+    fit_time_course,
+    fit_calibration_curve,
+    michaelis_menten_calibration,
+    plot_calibration_curve
+)
+import numpy as np
+from scipy.optimize import curve_fit
+import io
+import base64
 
 # Configure plotting
 plt.rcParams['font.family'] = 'DejaVu Sans'
@@ -49,6 +64,20 @@ def main():
     
     st.title("🔬  Hydrogel FRET Simulation")
     st.markdown("---")
+    
+    # 모드 선택
+    analysis_mode = st.sidebar.radio(
+        "분석 모드 선택",
+        ["Prep Raw Data 모드", "일반 분석 모드"],
+        help="Prep Raw Data 모드: Michaelis-Menten Analysis/ 일반 분석 모드: 표준 FRET 분석"
+    )
+    
+    st.markdown("---")
+    
+    # Prep Raw Data 모드
+    if analysis_mode == "Prep Raw Data 모드":
+        prep_raw_data_mode(st)
+        return
     
     # Sidebar configuration
     st.sidebar.title("⚙️ 설정")
@@ -571,6 +600,387 @@ def main():
             └─ 유속에 민감? → 모델 C (확산)
         ```
         """)
+
+
+def prep_raw_data_mode(st):
+    """Prep Raw Data 모드 - GraphPad Prism 스타일 MM Fitting"""
+    
+    st.header("📊 Prep Raw Data 모드")
+    st.markdown("GraphPad Prism 스타일 Michaelis-Menten Fitting 및 Calibration Curve 생성")
+    st.markdown("---")
+    
+    # 사이드바 설정
+    st.sidebar.title("⚙️ Prep Raw Data 설정")
+    
+    # 데이터 업로드
+    st.sidebar.subheader("📁 데이터 업로드")
+    uploaded_file = st.sidebar.file_uploader(
+        "Prep Raw CSV 파일 업로드",
+        type=['csv'],
+        help="prep_raw.csv 형식: 시간, 농도별 값, SD, 복제수 (3개 컬럼씩)"
+    )
+    
+    # 샘플 데이터 다운로드
+    try:
+        with open("prep_data/prep_raw.csv", "rb") as f:
+            sample_bytes = f.read()
+        st.sidebar.download_button(
+            label="샘플 prep_raw.csv 다운로드",
+            data=sample_bytes,
+            file_name="prep_raw_sample.csv",
+            mime="text/csv"
+        )
+    except Exception:
+        pass
+    
+    # 데이터 로드
+    if uploaded_file is not None:
+        # 업로드된 파일을 임시로 저장하고 읽기
+        import tempfile
+        import os
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.csv', mode='wb') as tmp_file:
+            tmp_file.write(uploaded_file.getbuffer())
+            tmp_path = tmp_file.name
+        
+        try:
+            raw_data = read_raw_data(tmp_path)
+            os.unlink(tmp_path)
+        except Exception as e:
+            st.error(f"파일 읽기 오류: {e}")
+            os.unlink(tmp_path)
+            return
+    else:
+        # 기본 샘플 데이터 사용
+        try:
+            raw_data = read_raw_data('prep_data/prep_raw.csv')
+            st.sidebar.info("prep_data/prep_raw.csv 사용 중")
+        except FileNotFoundError:
+            st.error("데이터 파일을 찾을 수 없습니다. CSV 파일을 업로드해주세요.")
+            st.stop()
+    
+    # 데이터 미리보기
+    st.subheader("📋 데이터 미리보기")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("농도 조건 수", len(raw_data))
+    with col2:
+        total_points = sum(len(data['time']) for data in raw_data.values())
+        st.metric("총 데이터 포인트", total_points)
+    
+    # 농도별 정보 표시
+    with st.expander("농도별 데이터 정보", expanded=False):
+        info_data = []
+        for conc_name, data in raw_data.items():
+            info_data.append({
+                '농도': conc_name,
+                '농도값': data['concentration'],
+                '데이터 포인트': len(data['time']),
+                '시간 범위': f"{data['time'].min():.1f} - {data['time'].max():.1f}",
+                'RFU 범위': f"{data['value'].min():.1f} - {data['value'].max():.1f}"
+            })
+        st.dataframe(pd.DataFrame(info_data), use_container_width=True)
+    
+    # 분석 실행 버튼
+    if st.button("🚀 MM Fitting 및 Calibration Curve 생성", type="primary"):
+        with st.spinner("분석 진행 중..."):
+            # 진행 상황 표시
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # 1. 각 농도별 시간 경과 곡선 피팅
+            status_text.text("1️⃣ 각 농도별 시간 경과 곡선 피팅 중...")
+            progress_bar.progress(0.2)
+            
+            mm_results = {}
+            all_fit_data = []
+            
+            for conc_name, data in raw_data.items():
+                times = data['time']
+                values = data['value']
+                
+                # Exponential Association 모델로 피팅
+                params, fit_values, r_sq = fit_time_course(times, values, model='exponential')
+                
+                # MM 파라미터 추출
+                Vmax = params['Vmax']
+                Km = params['Km']
+                F0 = params['F0']
+                Fmax = params['Fmax']
+                
+                mm_results[conc_name] = {
+                    'concentration': data['concentration'],
+                    'Vmax': Vmax,
+                    'Km': Km,
+                    'F0': F0,
+                    'Fmax': Fmax,
+                    'k': params['k'],
+                    'R_squared': r_sq
+                }
+                
+                # Fit curve 데이터 저장
+                for t, val, fit_val in zip(times, values, fit_values):
+                    all_fit_data.append({
+                        'Concentration': conc_name,
+                        'Conc_Value': data['concentration'],
+                        'Time_min': t,
+                        'Observed_Value': val,
+                        'Fit_Value': fit_val,
+                        'Residual': val - fit_val
+                    })
+            
+            progress_bar.progress(0.4)
+            
+            # 2. Calibration Curve 생성
+            status_text.text("2️⃣ Calibration Curve 생성 중...")
+            
+            concentrations = [mm_results[cn]['concentration'] for cn in sorted(mm_results.keys(), 
+                                                                              key=lambda x: mm_results[x]['concentration'])]
+            vmax_values = [mm_results[cn]['Vmax'] for cn in sorted(mm_results.keys(), 
+                                                                    key=lambda x: mm_results[x]['concentration'])]
+            
+            # MM calibration curve 피팅
+            cal_params, cal_fit_values, cal_equation = fit_calibration_curve(concentrations, vmax_values)
+            
+            progress_bar.progress(0.6)
+            
+            # 3. 결과 데이터 준비
+            status_text.text("3️⃣ 결과 준비 중...")
+            
+            # 결과 데이터프레임 생성
+            results_data = []
+            for conc_name, params in sorted(mm_results.items(), key=lambda x: x[1]['concentration']):
+                results_data.append({
+                    'Concentration': conc_name,
+                    'Conc_Value': params['concentration'],
+                    'Vmax': params['Vmax'],
+                    'Km': params['Km'],
+                    'F0': params['F0'],
+                    'Fmax': params['Fmax'],
+                    'k': params['k'],
+                    'R_squared': params['R_squared']
+                })
+            
+            results_df = pd.DataFrame(results_data)
+            fit_curves_df = pd.DataFrame(all_fit_data)
+            
+            # Calibration curve 데이터
+            conc_min = min(concentrations)
+            conc_max = max(concentrations)
+            conc_range = np.linspace(conc_min * 0.5, conc_max * 1.5, 200)
+            cal_y_values = michaelis_menten_calibration(conc_range, 
+                                                        cal_params['Vmax_cal'], 
+                                                        cal_params['Km_cal'])
+            
+            cal_curve_df = pd.DataFrame({
+                'Concentration': conc_range,
+                'Vmax_Fitted': cal_y_values,
+                'Equation': cal_equation
+            })
+            
+            # 방정식 데이터
+            equations_data = [{
+                'Type': 'Calibration Curve',
+                'Equation': cal_equation,
+                'Vmax': cal_params['Vmax_cal'],
+                'Km': cal_params['Km_cal'],
+                'R_squared': cal_params['R_squared']
+            }]
+            
+            for conc_name, params in sorted(mm_results.items(), key=lambda x: x[1]['concentration']):
+                eq = f"F(t) = {params['F0']:.2f} + ({params['Fmax'] - params['F0']:.2f}) * [1 - exp(-{params['k']:.4f}*t)]"
+                equations_data.append({
+                    'Type': f'Time Course ({conc_name})',
+                    'Equation': eq,
+                    'Vmax': params['Vmax'],
+                    'Km': params['Km'],
+                    'R_squared': params['R_squared']
+                })
+            
+            equations_df = pd.DataFrame(equations_data)
+            
+            progress_bar.progress(1.0)
+            status_text.text("✅ 분석 완료!")
+            
+            # Session state에 저장
+            st.session_state['prep_results'] = {
+                'mm_results': mm_results,
+                'results_df': results_df,
+                'fit_curves_df': fit_curves_df,
+                'cal_params': cal_params,
+                'cal_equation': cal_equation,
+                'cal_curve_df': cal_curve_df,
+                'equations_df': equations_df,
+                'raw_data': raw_data
+            }
+    
+    # 결과 표시
+    if 'prep_results' in st.session_state:
+        results = st.session_state['prep_results']
+        
+        # 탭 구성
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "📊 MM Results",
+            "📈 Time Course Fits",
+            "📉 Calibration Curve",
+            "📝 Equations",
+            "💾 Download"
+        ])
+        
+        with tab1:
+            st.subheader("Michaelis-Menten Fitting Results")
+            st.dataframe(results['results_df'], use_container_width=True)
+            
+            # 요약 통계
+            st.subheader("요약 통계")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("평균 R²", f"{results['results_df']['R_squared'].mean():.4f}")
+            with col2:
+                st.metric("평균 Vmax", f"{results['results_df']['Vmax'].mean():.2f}")
+            with col3:
+                st.metric("평균 Km", f"{results['results_df']['Km'].mean():.4f}")
+        
+        with tab2:
+            st.subheader("시간 경과 곡선 Fitting")
+            
+            # 각 농도별 그래프
+            fig = make_subplots(
+                rows=1, cols=1,
+                subplot_titles=('Time Course Fits',)
+            )
+            
+            colors = ['black', 'red', 'orange', 'green', 'purple']
+            conc_order = sorted(results['results_df']['Concentration'].values)
+            
+            for idx, conc_name in enumerate(conc_order):
+                subset = results['fit_curves_df'][results['fit_curves_df']['Concentration'] == conc_name]
+                color = colors[idx % len(colors)]
+                
+                # 관측값
+                fig.add_trace(go.Scatter(
+                    x=subset['Time_min'],
+                    y=subset['Observed_Value'],
+                    mode='markers',
+                    name=f'{conc_name} (Data)',
+                    marker=dict(color=color, size=8),
+                    legendgroup=conc_name
+                ))
+                
+                # Fit 값
+                fig.add_trace(go.Scatter(
+                    x=subset['Time_min'],
+                    y=subset['Fit_Value'],
+                    mode='lines',
+                    name=f'{conc_name} (Fit)',
+                    line=dict(color=color, width=2),
+                    legendgroup=conc_name
+                ))
+            
+            fig.update_layout(
+                xaxis_title='Time (min)',
+                yaxis_title='RFU',
+                height=600,
+                template='plotly_white'
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Fit curves 데이터
+            st.subheader("Fit Curves Data")
+            st.dataframe(results['fit_curves_df'], use_container_width=True)
+        
+        with tab3:
+            st.subheader("Calibration Curve")
+            
+            # Calibration curve 그래프
+            fig_cal = go.Figure()
+            
+            # 곡선
+            fig_cal.add_trace(go.Scatter(
+                x=results['cal_curve_df']['Concentration'],
+                y=results['cal_curve_df']['Vmax_Fitted'],
+                mode='lines',
+                name=f'MM Fit: {results["cal_equation"]}',
+                line=dict(color='blue', width=3)
+            ))
+            
+            # 실험 데이터 포인트
+            fig_cal.add_trace(go.Scatter(
+                x=results['results_df']['Conc_Value'],
+                y=results['results_df']['Vmax'],
+                mode='markers',
+                name='Experimental Data',
+                marker=dict(color='red', size=12, line=dict(color='black', width=2))
+            ))
+            
+            fig_cal.update_layout(
+                xaxis_title='Concentration (μg/mL)',
+                yaxis_title='Vmax (Fluorescence Units)',
+                title='Michaelis-Menten Calibration Curve',
+                height=600,
+                template='plotly_white'
+            )
+            
+            st.plotly_chart(fig_cal, use_container_width=True)
+            
+            # Calibration 파라미터
+            st.subheader("Calibration Parameters")
+            st.markdown(f"""
+            **방정식**: {results['cal_equation']}
+            
+            - **Vmax_cal**: {results['cal_params']['Vmax_cal']:.2f} ± {results['cal_params'].get('Vmax_cal_std', 0):.2f}
+            - **Km_cal**: {results['cal_params']['Km_cal']:.4f} ± {results['cal_params'].get('Km_cal_std', 0):.4f}
+            - **R²**: {results['cal_params']['R_squared']:.4f}
+            """)
+            
+            # Calibration curve 데이터
+            st.subheader("Calibration Curve Data")
+            st.dataframe(results['cal_curve_df'], use_container_width=True)
+        
+        with tab4:
+            st.subheader("방정식 요약")
+            st.dataframe(results['equations_df'], use_container_width=True)
+        
+        with tab5:
+            st.subheader("결과 다운로드")
+            
+            # CSV 다운로드 버튼들
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                csv_results = results['results_df'].to_csv(index=False)
+                st.download_button(
+                    label="MM Results (CSV)",
+                    data=csv_results,
+                    file_name="MM_results.csv",
+                    mime="text/csv"
+                )
+                
+                csv_cal = results['cal_curve_df'].to_csv(index=False)
+                st.download_button(
+                    label="Calibration Curve (CSV)",
+                    data=csv_cal,
+                    file_name="MM_calibration_curve.csv",
+                    mime="text/csv"
+                )
+                
+                csv_equations = results['equations_df'].to_csv(index=False)
+                st.download_button(
+                    label="Equations (CSV)",
+                    data=csv_equations,
+                    file_name="MM_equations.csv",
+                    mime="text/csv"
+                )
+            
+            with col2:
+                csv_fits = results['fit_curves_df'].to_csv(index=False)
+                st.download_button(
+                    label="Fit Curves (CSV)",
+                    data=csv_fits,
+                    file_name="MM_fit_curves.csv",
+                    mime="text/csv"
+                )
 
 
 if __name__ == "__main__":
