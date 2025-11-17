@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-from general_analysis_mode.analysis import (
+from mode_general_analysis.analysis import (
     UnitStandardizer,
     DataNormalizer,
     RegionDivider,
@@ -12,7 +12,7 @@ from general_analysis_mode.analysis import (
     ModelE_ProductInhibition,
     ModelF_EnzymeSurfaceSequestration
 )
-from general_analysis_mode.plot import Visualizer
+from mode_general_analysis.plot import Visualizer
 
 
 def verbose_callback(message: str, level: str = "info"):
